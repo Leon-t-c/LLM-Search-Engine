@@ -7,6 +7,7 @@ rather than by prompt-tuning, and the two are measured independently.
 Anything needing a database lookup is left exactly as written, for the host to
 resolve — this service has no data access.
 """
+import math
 import re
 
 from ..ir.payload import NO_VALUE_OPS, Payload
@@ -28,8 +29,12 @@ def resolve_vocabulary(spec: FieldSpec, raw) -> str | None:
     """Map a word the user typed onto the code they would have typed.
 
     Matches an existing code first, then a meaning, then a synonym — all
-    case-folded. Returns None when nothing matches; a guessed status code is a
-    query that runs cleanly and returns the wrong rows.
+    case-folded. The precedence order is load-bearing: under collision (two
+    entries sharing a case-folded synonym), the first entry wins without
+    signalling the ambiguity — a registry data-quality problem to fix at source.
+
+    Returns None when nothing matches; a guessed status code is a query that
+    runs cleanly and returns the wrong rows.
     """
     if not spec.vocabulary:
         return None
@@ -61,10 +66,24 @@ def resolve_relative_year(raw, now_year: int) -> int | None:
 
 
 def resolve_money(raw) -> float | None:
+    """Strip currency formatting and parse, or return None.
+
+    The finiteness check is required, not defensive. `float()` accepts
+    "nan", "inf", "-inf" and "Infinity" without raising, and silently
+    overflows "1e400" to infinity — so without it a nonsensical amount is
+    reported as *resolved* and written into the payload, where it reaches the
+    query as a value that matches nothing. That is precisely the
+    silent-wrong-answer failure this module exists to prevent, and it is the
+    overflow case rather than a literal "nan" that makes it reachable.
+
+    A negative amount is accepted deliberately — credits and reversals are
+    legitimate values in this position.
+    """
     try:
-        return float(_MONEY_STRIP.sub("", str(raw)))
+        amount = float(_MONEY_STRIP.sub("", str(raw)))
     except (TypeError, ValueError):
         return None
+    return amount if math.isfinite(amount) else None
 
 
 def _resolve_one(spec: FieldSpec, raw, now_year: int):

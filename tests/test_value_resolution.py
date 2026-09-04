@@ -1,4 +1,7 @@
+import pytest
+
 from cert_nlq.ir.payload import Payload
+from cert_nlq.registry.models import VocabEntry
 from cert_nlq.translate.values import (
     resolve_money,
     resolve_relative_year,
@@ -115,4 +118,69 @@ def test_a_field_missing_from_the_root_is_passed_through(registry):
     )
     resolved, unresolved = resolve_values(payload, registry.root("widget"), now_year=2026)
     assert resolved.conditions[0].value == "z"
+    assert unresolved == []
+
+
+def test_money_accepts_a_negative_amount():
+    """Credits and reversals are legitimate here — this is deliberate."""
+    assert resolve_money("-$500") == -500.0
+
+
+@pytest.mark.parametrize(
+    "raw", ["nan", "NaN", "  nan  ", "inf", "-inf", "Infinity", "1e400", "-1e400"]
+)
+def test_money_rejects_non_finite_values(raw):
+    """`float()` parses these without raising, and overflows 1e400 to inf.
+
+    A non-finite amount that is reported as *resolved* reaches the query as a
+    value matching nothing — the silent wrong answer this module exists to
+    prevent. The overflow case is what makes it reachable: a model emitting a
+    large number in scientific notation needs no exotic input to trigger it.
+    """
+    assert resolve_money(raw) is None
+
+
+def test_a_non_finite_money_value_is_reported_unresolved(registry):
+    """End to end: the rejection must surface in `unresolved`, not vanish."""
+    payload = Payload.model_validate(
+        {"root": "widget", "combinator": "AND",
+         "conditions": [{"field": "widget.price", "op": ">", "value": "1e400"}]}
+    )
+    resolved, unresolved = resolve_values(payload, registry.root("widget"), now_year=2026)
+    assert unresolved == ["widget.price=1e400"]
+    assert resolved.conditions[0].value == "1e400", "left as written, not coerced"
+
+
+def test_a_code_beats_another_entrys_synonym(registry):
+    """Precedence matters only under collision, so build one deliberately."""
+    spec = registry.root("widget").fields_by_key["widget.status"].model_copy(
+        update={"vocabulary": (
+            VocabEntry(code="A", meaning="Active", synonyms=()),
+            VocabEntry(code="B", meaning="Retired", synonyms=("A",)),
+        )}
+    )
+    assert resolve_vocabulary(spec, "A") == "A", "the code must win, not B's synonym"
+
+
+def test_a_vocabulary_beats_the_type_parser(registry):
+    """A field may declare both a vocabulary and a numeric type.
+
+    The registry does not forbid it, so the dispatch order is reachable. The
+    vocabulary wins: an explicit entry the field's owner defined outranks a
+    generic parse.
+    """
+    spec = registry.root("widget").fields_by_key["widget.price"].model_copy(
+        update={"vocabulary": (VocabEntry(code="Z", meaning="unpriced", synonyms=()),)}
+    )
+    assert resolve_vocabulary(spec, "unpriced") == "Z"
+    payload = Payload.model_validate(
+        {"root": "widget", "combinator": "AND",
+         "conditions": [{"field": "widget.price", "op": "=", "value": "unpriced"}]}
+    )
+    root = registry.root("widget")
+    patched = root.model_copy(update={"fields": tuple(
+        spec if f.key == "widget.price" else f for f in root.fields
+    )})
+    resolved, unresolved = resolve_values(payload, patched, now_year=2026)
+    assert resolved.conditions[0].value == "Z"
     assert unresolved == []
