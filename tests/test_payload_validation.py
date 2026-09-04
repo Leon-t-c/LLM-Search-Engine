@@ -186,3 +186,54 @@ def test_all_problems_are_reported_together(registry):
     with pytest.raises(PayloadError) as exc:
         validate_payload(_ok(join=["court"], columns=["widget.nope"]), registry)
     assert len(exc.value.problems) == 2
+
+
+@pytest.mark.parametrize(
+    "slot, extra",
+    [
+        ("column", {"columns": ["shipment.amount"]}),
+        ("aggregate field",
+         {"aggregate": [{"fn": "sum", "field": "shipment.amount", "as": "t"}]}),
+        ("group_by field",
+         {"aggregate": [{"fn": "count", "field": "*", "as": "n"}],
+          "group_by": ["shipment.amount"]}),
+        ("sort field", {"sort": {"field": "shipment.amount", "dir": "desc"}}),
+    ],
+)
+def test_every_slot_says_requires_join_not_unknown(registry, slot, extra):
+    """A joinable field must never be reported as nonexistent, in any slot.
+
+    The problem text is fed back to the model verbatim as retry guidance, so
+    "add the join" and "pick a different field" send the correction down
+    different paths. `conditions` got this right from the start; the other
+    four slots did not.
+    """
+    with pytest.raises(PayloadError) as exc:
+        validate_payload(_ok(**extra), registry)
+    joined = [p for p in exc.value.problems if "shipment.amount" in p]
+    assert joined, f"no problem mentioned the field for slot {slot!r}"
+    assert "requires join 'shipment'" in joined[0], joined[0]
+    assert "unknown" not in joined[0], joined[0]
+
+
+def test_a_genuinely_absent_field_still_says_unknown(registry):
+    """The counterpart: don't turn every miss into a join suggestion."""
+    with pytest.raises(PayloadError, match="unknown column 'nosuch.field'"):
+        validate_payload(_ok(columns=["nosuch.field"]), registry)
+
+
+def test_avg_over_a_text_field_is_rejected(registry):
+    """`sum` was covered; `avg` shares the branch and was not."""
+    with pytest.raises(PayloadError, match="cannot avg"):
+        validate_payload(
+            _ok(aggregate=[{"fn": "avg", "field": "widget.status", "as": "a"}]),
+            registry,
+        )
+
+
+def test_an_aggregate_over_an_absent_field_is_rejected(registry):
+    with pytest.raises(PayloadError, match="unknown aggregate field"):
+        validate_payload(
+            _ok(aggregate=[{"fn": "sum", "field": "nosuch.field", "as": "t"}]),
+            registry,
+        )

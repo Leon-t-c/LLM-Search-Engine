@@ -30,10 +30,10 @@ def validate_payload(raw: dict | Payload, registry: Registry) -> Payload:
     problems += _check_joins(payload, root)
     available = _available_fields(payload, root)
     problems += _check_conditions(payload, root, available)
-    problems += _check_columns(payload, available)
-    aliases, agg_problems = _check_aggregates(payload, available)
+    problems += _check_columns(payload, root, available)
+    aliases, agg_problems = _check_aggregates(payload, root, available)
     problems += agg_problems
-    problems += _check_having_and_sort(payload, available, aliases)
+    problems += _check_having_and_sort(payload, root, available, aliases)
     if not payload.conditions and not payload.aggregate:
         problems.append("a payload needs at least one condition")
     if problems:
@@ -55,17 +55,33 @@ def _available_fields(payload: Payload, root: RootSpec) -> dict:
     return {f.key: f for f in root.fields if f.table in tables}
 
 
+def _resolve_field(key: str, available: dict, all_fields: dict, label: str):
+    """Look a key up, distinguishing "needs a join" from "does not exist".
+
+    Returns `(spec, problem)` — exactly one of which is None.
+
+    The distinction is load-bearing, not cosmetic: the problem text is fed
+    back to the model verbatim as retry guidance, and "add the join" and "pick
+    a different field" send a correction down entirely different paths. Telling
+    a caller a field does not exist when it does, and merely needs its table
+    joined, wastes the one retry and ends in a refusal.
+    """
+    spec = available.get(key)
+    if spec is not None:
+        return spec, None
+    elsewhere = all_fields.get(key)
+    if elsewhere is not None:
+        return None, f"{key!r} requires join {elsewhere.table!r}"
+    return None, f"unknown {label} {key!r}"
+
+
 def _check_conditions(payload: Payload, root: RootSpec, available: dict) -> list[str]:
     problems = []
     all_fields = root.fields_by_key
     for cond in payload.conditions:
-        spec = available.get(cond.field)
-        if spec is None:
-            other = all_fields.get(cond.field)
-            if other is not None:
-                problems.append(f"{cond.field!r} requires join {other.table!r}")
-            else:
-                problems.append(f"unknown field {cond.field!r}")
+        spec, problem = _resolve_field(cond.field, available, all_fields, "field")
+        if problem is not None:
+            problems.append(problem)
             continue
         if cond.op not in spec.operators:
             problems.append(f"operator {cond.op!r} not allowed for {spec.label!r}")
@@ -83,11 +99,20 @@ def _check_conditions(payload: Payload, root: RootSpec, available: dict) -> list
     return problems
 
 
-def _check_columns(payload: Payload, available: dict) -> list[str]:
-    return [f"unknown column {key!r}" for key in payload.columns if key not in available]
+def _check_columns(payload: Payload, root: RootSpec, available: dict) -> list[str]:
+    all_fields = root.fields_by_key
+    problems = []
+    for key in payload.columns:
+        _, problem = _resolve_field(key, available, all_fields, "column")
+        if problem is not None:
+            problems.append(problem)
+    return problems
 
 
-def _check_aggregates(payload: Payload, available: dict) -> tuple[set[str], list[str]]:
+def _check_aggregates(
+    payload: Payload, root: RootSpec, available: dict
+) -> tuple[set[str], list[str]]:
+    all_fields = root.fields_by_key
     problems: list[str] = []
     aliases: set[str] = set()
     for agg in payload.aggregate:
@@ -98,22 +123,21 @@ def _check_aggregates(payload: Payload, available: dict) -> tuple[set[str], list
             if agg.fn != "count":
                 problems.append("only 'count' accepts '*' as a target")
             continue
-        spec = available.get(agg.field)
-        if spec is None:
-            problems.append(f"unknown aggregate field {agg.field!r}")
+        spec, problem = _resolve_field(agg.field, available, all_fields, "aggregate field")
+        if problem is not None:
+            problems.append(problem)
             continue
         if agg.fn in ("sum", "avg") and spec.type not in NUMERIC_AGG_TYPES:
             problems.append(f"cannot {agg.fn} {spec.label!r}: type is {spec.type!r}")
-    problems += [
-        f"unknown group_by field {key!r}"
-        for key in payload.group_by
-        if key not in available
-    ]
+    for key in payload.group_by:
+        _, problem = _resolve_field(key, available, all_fields, "group_by field")
+        if problem is not None:
+            problems.append(problem)
     return aliases, problems
 
 
 def _check_having_and_sort(
-    payload: Payload, available: dict, aliases: set[str]
+    payload: Payload, root: RootSpec, available: dict, aliases: set[str]
 ) -> list[str]:
     problems = [
         f"having references unknown alias {clause.agg!r}"
@@ -125,6 +149,8 @@ def _check_having_and_sort(
         return problems
     if sort.agg is not None and sort.agg not in aliases:
         problems.append(f"sort references unknown alias {sort.agg!r}")
-    if sort.field is not None and sort.field not in available:
-        problems.append(f"unknown sort field {sort.field!r}")
+    if sort.field is not None:
+        _, problem = _resolve_field(sort.field, available, root.fields_by_key, "sort field")
+        if problem is not None:
+            problems.append(problem)
     return problems
