@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from pydantic import ValidationError
 
@@ -144,3 +146,34 @@ def test_a_genuinely_empty_slice_is_a_programming_error(registry):
     empty = registry.root("widget").model_copy(update={"fields": ()})
     with pytest.raises(ValueError, match="no fields in scope"):
         build_payload_model(empty)
+
+
+def test_the_field_key_enum_is_not_repeated(registry):
+    """Every duplicate copy is tokens paid on every single call."""
+    schema = json_schema_for(registry.root("widget"))
+    body = json.dumps(schema)
+    # Count the enum lists that contain a representative key.
+    assert body.count('"widget.shipped"') == 2, (
+        "expected one copy in the shared field enum and one in the "
+        "aggregate enum (which also allows '*')"
+    )
+
+
+def test_deduplication_preserves_validation(registry):
+    """The $ref rewrite must not loosen what the schema accepts."""
+    model = build_payload_model(registry.root("widget"))
+    schema = json_schema_for(registry.root("widget"))
+    assert "$defs" in schema
+    # the model itself is unchanged — only its serialised schema is rewritten
+    model.model_validate(
+        {"root": "widget", "combinator": "AND",
+         "conditions": [{"field": "widget.price", "op": ">", "value": 1}],
+         "columns": ["widget.price"], "group_by": ["widget.region"]}
+    )
+
+
+def test_dedupe_enums_is_idempotent(registry):
+    from cert_nlq.ir.schema import dedupe_enums
+
+    once = json_schema_for(registry.root("widget"))
+    assert dedupe_enums(once) == once

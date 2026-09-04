@@ -5,6 +5,7 @@ the registry, so a structured-output model physically cannot name a field that
 does not exist or a join we did not enumerate. This is the property that
 replaces the SQL parser and security validator a text-to-SQL design needs.
 """
+import json
 from typing import Literal, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, create_model
@@ -88,10 +89,67 @@ def build_payload_model(
     )
 
 
+def dedupe_enums(schema: dict) -> dict:
+    """Hoist each repeated `enum` list into `$defs` and `$ref` it.
+
+    The field-key enum appears in several slots of the payload schema, and the
+    whole schema is sent on every translation call. Pydantic inlines `Literal`
+    enums, so this is a post-processing pass rather than something the model
+    definition can express.
+
+    Only lists that occur more than once are hoisted; a schema with no
+    repetition comes back unchanged, which makes the function idempotent.
+    """
+    counts: dict[str, int] = {}
+
+    def tally(node):
+        if isinstance(node, dict):
+            values = node.get("enum")
+            if isinstance(values, list) and len(values) > 1:
+                counts[json.dumps(values)] = counts.get(json.dumps(values), 0) + 1
+            for value in node.values():
+                tally(value)
+        elif isinstance(node, list):
+            for value in node:
+                tally(value)
+
+    tally(schema)
+    repeated = [key for key, n in counts.items() if n > 1]
+    if not repeated:
+        return schema
+
+    names = {key: f"Enum{i}" for i, key in enumerate(sorted(repeated))}
+
+    def rewrite(node):
+        if isinstance(node, dict):
+            values = node.get("enum")
+            key = json.dumps(values) if isinstance(values, list) else None
+            if key in names:
+                rest = {k: v for k, v in node.items() if k not in ("enum", "type")}
+                return {**rest, "$ref": f"#/$defs/{names[key]}"}
+            return {k: rewrite(v) for k, v in node.items()}
+        if isinstance(node, list):
+            return [rewrite(v) for v in node]
+        return node
+
+    result = rewrite(schema)
+    defs = dict(result.get("$defs") or {})
+    for key, name in names.items():
+        values = json.loads(key)
+        defs[name] = {"type": "string", "enum": values}
+    result["$defs"] = defs
+    return result
+
+
 def json_schema_for(
     root: RootSpec,
     groups: Sequence[str] = (),
     joins: Sequence[str] = (),
 ) -> dict:
-    """The constrained schema to hand to a structured-output call."""
-    return build_payload_model(root, groups, joins).model_json_schema(by_alias=True)
+    """The constrained schema to hand to a structured-output call.
+
+    Enum lists are deduplicated: the same field-key list otherwise ships
+    several times in every call, and the schema is the bulk of the prompt.
+    """
+    model = build_payload_model(root, groups, joins)
+    return dedupe_enums(model.model_json_schema(by_alias=True))
