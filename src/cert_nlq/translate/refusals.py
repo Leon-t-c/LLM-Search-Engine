@@ -15,17 +15,42 @@ class RefusalReason(StrEnum):
     NOT_A_QUERY = "not_a_query"
 
 
-#: An OR inside parentheses, or an ", and" closing a preceding "or" group —
-#: both mean a single AND/OR combinator cannot express the question.
+#: An explicit parenthesised disjunction.
 _PARENTHESISED_OR = re.compile(r"\([^)]*\bor\b[^)]*\)", re.IGNORECASE)
-_OR_THEN_AND = re.compile(r"\bor\b.*,\s*and\b", re.IGNORECASE)
+#: A conjunction somewhere in the question.
+_CONJUNCTION = re.compile(r"\band\b", re.IGNORECASE)
 
 
 def looks_nested(question: str) -> bool:
-    """Cheap pre-check for a question needing grouped boolean logic.
+    """Cheap pre-check for a question needing BOTH a disjunction and a
+    conjunction, which one combinator cannot express.
 
-    Flattening `(A OR B) AND C` into `A OR B OR C` returns wrong rows that look
-    plausible, so refusing is correct. This is a heuristic; the model is also
-    instructed to refuse, and this catches the obvious cases before a call.
+    Flattening `(A or B) and C` into `A or B or C` returns wrong rows that look
+    plausible, so refusing is correct — where we are confident.
+
+    **Precision is chosen over recall deliberately**, because the two costs are
+    not symmetric the way they are usually assumed to be:
+
+    - A false positive refuses a question that was answerable. The user gets
+      nothing, gives up, and no example is logged. That loss is invisible.
+    - A false negative spends one model call. The model is separately
+      instructed that it cannot express grouped logic, so it is a second line
+      of defence; when it flattens instead, that is a model error the
+      evaluation harness counts and can act on.
+
+    So this fires only on an explicit parenthesised disjunction *combined with*
+    a conjunction. Two shapes it deliberately does not catch:
+
+    - `(settled or withdrawn) widgets` — a plain disjunction, expressible with
+      a single OR. Parentheses alone are not a nesting signal, and an earlier
+      draft refused this.
+    - `widgets that are active or retired, and shipped in 2024` — real nesting
+      with no parentheses. An earlier draft caught it with a comma pattern that
+      also refused ordinary phrasing: "filed on or before 2024-01-01, and
+      settled" is an everyday date range, not boolean grouping. Refusing those
+      is far worse than missing this.
+
+    Widen this only once the evaluation harness shows how often the model fails
+    to refuse the unparenthesised shape on its own.
     """
-    return bool(_PARENTHESISED_OR.search(question) or _OR_THEN_AND.search(question))
+    return bool(_PARENTHESISED_OR.search(question) and _CONJUNCTION.search(question))
