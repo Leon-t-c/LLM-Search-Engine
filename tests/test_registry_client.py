@@ -72,6 +72,7 @@ def test_transport_error_raises_registry_unavailable():
 
 @respx.mock
 def test_malformed_registry_raises_registry_unavailable():
+    """Well-formed JSON that does not satisfy the schema."""
     respx.get(URL).mock(return_value=httpx.Response(200, json={"version": "v"}))
     with pytest.raises(RegistryUnavailable, match="malformed"):
         RegistryClient("https://cert.example", token="t").fetch()
@@ -90,3 +91,30 @@ def test_a_failed_refetch_leaves_the_previous_cache_intact(registry_json):
     with pytest.raises(RegistryUnavailable):
         client.fetch(force=True)
     assert client.cached.version == "sha256:fixture-v1"
+
+
+@respx.mock
+def test_a_non_json_body_raises_registry_unavailable():
+    """A body that is not JSON at all — a different failure from the above.
+
+    `response.json()` raises `json.JSONDecodeError`, a `ValueError`, which is
+    NOT an `httpx.HTTPError`. Without its own guard it escapes uncaught and
+    the API layer returns an unhandled 500 rather than the 503 it handles.
+    """
+    respx.get(URL).mock(return_value=httpx.Response(200, text="not json at all"))
+    with pytest.raises(RegistryUnavailable, match="not JSON"):
+        RegistryClient("https://cert.example", token="t").fetch()
+
+
+@respx.mock
+def test_an_injected_client_is_used_and_carries_the_header(registry_json):
+    """The `client=` injection path, which the other tests never exercise."""
+    route = respx.get(URL).mock(
+        return_value=httpx.Response(200, json=registry_json)
+    )
+    with httpx.Client() as injected:
+        result = RegistryClient(
+            "https://cert.example", token="injected-token", client=injected
+        ).fetch()
+    assert result.version == "sha256:fixture-v1"
+    assert route.calls[0].request.headers["authorization"] == "Bearer injected-token"

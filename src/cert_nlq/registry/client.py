@@ -30,7 +30,7 @@ class RegistryClient:
 
         A failed forced refetch raises and leaves the previous cache in place,
         so registry skew degrades to a stale vocabulary rather than an outage.
-        Django re-validates every payload regardless (spec 5).
+        The host re-validates every payload regardless.
         """
         if self.cached is not None and not force:
             return self.cached
@@ -47,13 +47,24 @@ class RegistryClient:
                 with httpx.Client(timeout=self._timeout) as client:
                     response = client.get(self._url, headers=headers)
             response.raise_for_status()
-            body = response.json()
         except httpx.HTTPStatusError as exc:
             raise RegistryUnavailable(
                 f"registry returned {exc.response.status_code}"
             ) from exc
         except httpx.HTTPError as exc:
             raise RegistryUnavailable(f"registry unreachable: {exc}") from exc
+
+        # `response.json()` raises json.JSONDecodeError — a ValueError, NOT an
+        # httpx.HTTPError — so it needs its own guard. Without it a non-JSON
+        # 200 body escapes as an unhandled decode error and the API layer
+        # returns 500 instead of the 503 it has a handler for.
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise RegistryUnavailable(
+                f"registry response was not JSON: {exc}"
+            ) from exc
+
         try:
             return Registry.model_validate(body)
         except ValidationError as exc:
