@@ -177,3 +177,77 @@ def test_dedupe_enums_is_idempotent(registry):
 
     once = json_schema_for(registry.root("widget"))
     assert dedupe_enums(once) == once
+
+
+def test_sort_field_is_vocabulary_closed(registry):
+    """`sort.field`'s domain is the same as `columns`; it must be closed too."""
+    model = build_payload_model(registry.root("widget"))
+    model.model_validate(
+        {"root": "widget", "combinator": "AND", "conditions": [],
+         "sort": {"field": "widget.price", "dir": "desc"}}
+    )
+    with pytest.raises(ValidationError):
+        model.model_validate(
+            {"root": "widget", "combinator": "AND", "conditions": [],
+             "sort": {"field": "widget.invented", "dir": "desc"}}
+        )
+
+
+def test_sort_still_requires_exactly_one_target(registry):
+    """Narrowing `field` by subclassing must not drop the inherited xor rule."""
+    model = build_payload_model(registry.root("widget"))
+    with pytest.raises(ValidationError):
+        model.model_validate(
+            {"root": "widget", "combinator": "AND", "conditions": [],
+             "sort": {"field": "widget.price", "agg": "total", "dir": "asc"}}
+        )
+
+
+def test_having_op_is_closed_but_agg_is_not(registry):
+    """`op` is a fixed comparison set; `agg` names a same-payload alias.
+
+    The alias is not knowable when this schema is built, so it stays an open
+    string and validation resolves it. The operator has no such excuse.
+    """
+    model = build_payload_model(registry.root("widget"))
+    model.model_validate(
+        {"root": "widget", "combinator": "AND", "conditions": [],
+         "aggregate": [{"fn": "count", "field": "*", "as": "n"}],
+         "having": [{"agg": "n", "op": ">", "value": 1}]}
+    )
+    with pytest.raises(ValidationError):
+        model.model_validate(
+            {"root": "widget", "combinator": "AND", "conditions": [],
+             "having": [{"agg": "n", "op": "not_an_operator", "value": 1}]}
+        )
+
+
+def test_an_operator_outside_the_slice_is_rejected(registry):
+    """The op union is closed, even though it is not scoped per field."""
+    model = build_payload_model(registry.root("widget"))
+    with pytest.raises(ValidationError):
+        model.model_validate(
+            {"root": "widget", "combinator": "AND",
+             "conditions": [{"field": "widget.status", "op": "made_up", "value": "A"}]}
+        )
+
+
+def test_a_hoisted_ref_carries_no_sibling_keys(registry):
+    """Bare `$ref` — some providers' strict modes reject siblings beside it."""
+    schema = json_schema_for(registry.root("widget"))
+    refs = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            if "$ref" in node:
+                refs.append(node)
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+
+    walk(schema)
+    assert refs, "expected at least one hoisted enum"
+    offenders = [r for r in refs if set(r) != {"$ref"}]
+    assert offenders == [], f"$ref with siblings: {offenders}"

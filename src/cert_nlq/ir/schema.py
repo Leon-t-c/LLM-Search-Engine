@@ -1,9 +1,12 @@
 """Generate a constrained Pydantic model from a narrowed registry slice.
 
-The model's `field`, `op`, `join` and `fn` slots are Literal unions drawn from
-the registry, so a structured-output model physically cannot name a field that
-does not exist or a join we did not enumerate. This is the property that
-replaces the SQL parser and security validator a text-to-SQL design needs.
+The model's `field`, `columns`, `group_by`, `sort.field`, `join` and `root`
+slots are Literal unions drawn from the registry, so a structured-output
+model physically cannot name a field, join or root that does not exist. The
+vocabulary is closed this way; the field/operator *pairing* is not — `op` is
+the union across the whole slice, so a number field can still be paired with
+a text operator, and that combination is what validation, not the schema,
+rejects.
 """
 import json
 from typing import Literal, Sequence
@@ -15,6 +18,10 @@ from .payload import Having, Sort
 
 #: Stands in for "no joins available" — `Literal[()]` is not constructible.
 _NO_JOIN = "__none__"
+
+#: Comparison operators legal against an aggregate in `having`. Fixed, and
+#: independent of the registry — an aggregate is always a number.
+HAVING_OPS = ("=", "!=", ">", "<", ">=", "<=")
 
 
 def fields_in_scope(
@@ -74,6 +81,18 @@ def build_payload_model(
         field=(Literal[keys + ("*",)], ...),
         alias=(str, Field(alias="as")),
     )
+    # `sort.field` and `having.op` are narrowed by subclassing rather than
+    # redeclaring, so the xor rule on Sort and the shape of Having stay
+    # single-source in payload.py.
+    #
+    # `having.agg` deliberately stays an unconstrained `str`: it names an alias
+    # declared elsewhere in the same payload, which is not knowable when this
+    # schema is built. Validation resolves it against the declared aliases.
+    sort = create_model(f"{title}Sort", __base__=Sort,
+                        field=(Literal[keys] | None, None))
+    having = create_model(f"{title}Having", __base__=Having,
+                          op=(Literal[HAVING_OPS], ...))
+
     return create_model(
         f"{title}Payload",
         __config__=ConfigDict(frozen=True, populate_by_name=True),
@@ -84,8 +103,8 @@ def build_payload_model(
         join=(tuple[Literal[join_names], ...], ()),
         aggregate=(tuple[aggregate, ...], ()),
         group_by=(tuple[Literal[keys], ...], ()),
-        having=(tuple[Having, ...], ()),
-        sort=(Sort | None, None),
+        having=(tuple[having, ...], ()),
+        sort=(sort | None, None),
     )
 
 
@@ -125,8 +144,13 @@ def dedupe_enums(schema: dict) -> dict:
             values = node.get("enum")
             key = json.dumps(values) if isinstance(values, list) else None
             if key in names:
-                rest = {k: v for k, v in node.items() if k not in ("enum", "type")}
-                return {**rest, "$ref": f"#/$defs/{names[key]}"}
+                # Emit a BARE `$ref` — drop every sibling key rather than
+                # carrying `title`/`description` alongside it. JSON Schema
+                # 2020-12 permits siblings, but some providers' strict
+                # structured-output modes reject them, and the siblings here
+                # are purely informational. Dropping them also shrinks the
+                # schema further.
+                return {"$ref": f"#/$defs/{names[key]}"}
             return {k: rewrite(v) for k, v in node.items()}
         if isinstance(node, list):
             return [rewrite(v) for v in node]
