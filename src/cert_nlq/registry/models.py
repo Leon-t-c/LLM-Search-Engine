@@ -83,9 +83,10 @@ class JoinSpec(BaseModel):
 class GroupSpec(BaseModel):
     """One picker section.
 
-    `description` exists for the router prompt: the host app's group names are
-    UI section abbreviations ("Cons", "Occ", "AppUse") that a model cannot
-    reliably interpret from the name alone.
+    `description` exists for the router prompt: a host application's group
+    names are UI section labels — often abbreviated, sometimes unrelated to
+    the fields they contain — which a model cannot reliably interpret from
+    the name alone.
     """
 
     model_config = ConfigDict(frozen=True)
