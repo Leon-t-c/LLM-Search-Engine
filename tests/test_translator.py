@@ -199,3 +199,43 @@ def test_an_ordinary_failure_still_asks_for_the_offered_fields(registry):
     ])
     translate("retired widgets", registry, provider, now_year=2026)
     assert "only the offered fields" in provider.calls[2]["question"]
+
+
+BOTH_GROUPS = {"root": "widget", "joins": [],
+               "groups": ["Location & Identity", "Lifecycle"]}
+
+
+def test_every_unresolved_value_is_pruned_not_just_the_clarified_one(registry):
+    """A clarification payload states facts; an unresolved value is not one.
+
+    It is documented as the seed for the caller's builder, so a value that
+    failed to resolve shipping inside it shows the user a bogus filter as
+    though it were valid, and compiles to a query matching nothing.
+    """
+    provider = FakeProvider([
+        BOTH_GROUPS,
+        {"root": "widget", "where": {"combinator": "AND", "children": [
+            {"field": "widget.serial", "op": "=", "value": 7},
+            {"field": "widget.status", "op": "=", "value": "problematic"},
+            {"field": "widget.region", "op": "=", "value": "middle earth"},
+        ]}},
+    ])
+    response = translate("odd widgets", registry, provider, now_year=2026)
+    assert response.status == "needs_clarification"
+    assert response.unresolved.phrase == "problematic"
+    kept = list(iter_conditions(response.payload.where))
+    assert [c.field for c in kept] == ["widget.serial"]
+    assert all(c.value not in ("problematic", "middle earth") for c in kept)
+
+
+def test_nothing_survives_the_pruning_so_it_refuses(registry):
+    """Two unresolvable conditions and nothing else leave an empty builder."""
+    provider = FakeProvider([
+        BOTH_GROUPS,
+        {"root": "widget", "where": {"combinator": "AND", "children": [
+            {"field": "widget.status", "op": "=", "value": "problematic"},
+            {"field": "widget.region", "op": "=", "value": "middle earth"},
+        ]}},
+    ])
+    response = translate("odd widgets", registry, provider, now_year=2026)
+    assert response.status == "refused"

@@ -71,7 +71,7 @@ def translate(
 
     resolved, unresolved = resolve_values(payload, root, now_year or date.today().year)
     if unresolved:
-        return _clarify(resolved, root, unresolved[0], registry.version)
+        return _clarify(resolved, root, unresolved, registry.version)
     return Ok(payload=resolved, registry_version=registry.version)
 
 
@@ -161,19 +161,32 @@ def _as_group(node) -> Group:
 
 
 def _clarify(
-    payload: Payload, root: RootSpec, unresolved: Unresolvable, version: str
+    payload: Payload, root: RootSpec, unresolved: list[Unresolvable], version: str
 ) -> TranslateResponse:
-    """Drop the unresolved condition and offer the field's own codes.
+    """Ask about the first unresolved value; ship none of them.
+
+    Every unresolved field is pruned, not just the one being asked about. The
+    payload that goes back is documented as the seed for the caller's builder,
+    so anything left in it is a claim that it resolved — a second bogus value
+    riding along shows the user an invalid filter as though it were valid, and
+    compiles to a query matching nothing. Only the first is asked about, but
+    the rest are simply not asserted.
 
     Candidates carry the registry's field label with the raw stored value —
     `Status = X`, never a paraphrase. Users read these codes fluently. Each
-    candidate is offered under `unresolved.op`, the operator the phrase was
-    actually asked under — for a list (`in`) operator that means each
+    candidate is offered under the operator the phrase was actually asked
+    under — for a list (`in`) operator that means each
     candidate offers one legal element, not a whole list.
     """
-    key, phrase = unresolved.field, str(unresolved.value)
+    asked_about = unresolved[0]
+    key, phrase = asked_about.field, str(asked_about.value)
     spec = root.fields_by_key.get(key)
-    kept = _without_field(payload.where, key)
+    kept = payload.where
+    # dict.fromkeys, not a set: one pass per distinct field, in the order the
+    # values were reported, so the surviving tree does not depend on iteration
+    # order. Pruning is idempotent per field, hence the dedupe.
+    for unresolved_key in dict.fromkeys(u.field for u in unresolved):
+        kept = _without_field(kept, unresolved_key)
     vocabulary = spec.vocabulary if spec is not None else ()
     if not vocabulary or kept is None:
         return Refused(
@@ -183,7 +196,7 @@ def _clarify(
     candidates = tuple(
         Candidate(
             field=key,
-            op=unresolved.op,
+            op=asked_about.op,
             value=entry.code,
             label=spec.label,
         )
