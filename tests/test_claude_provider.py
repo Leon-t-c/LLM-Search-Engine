@@ -277,6 +277,27 @@ def test_a_truncated_response_names_the_cap_not_the_json():
     assert "JSON" not in message
 
 
+def test_an_overlong_input_names_the_context_window_not_the_json():
+    """An input that did not fit is a different fix from a low output cap.
+
+    Left to fall through, it surfaces as a missing text block and sends the
+    reader looking for a malformed model. The two messages must also stay
+    distinguishable: one is fixed by sending less, the other by allowing more
+    output, and a reader who confuses them changes the wrong thing.
+    """
+    from cert_nlq.translate.claude_provider import MAX_TOKENS
+
+    client, _, _ = _client(content=[], stop_reason="model_context_window_exceeded")
+    with pytest.raises(ProviderError) as caught:
+        ClaudeProvider("key", client=client).complete("sys", "q", SCHEMA, "R")
+    message = str(caught.value)
+    assert "context window" in message
+    assert "input" in message
+    assert "text block" not in message
+    assert "max_tokens" not in message
+    assert str(MAX_TOKENS) not in message
+
+
 def test_a_response_with_no_stop_reason_stays_inside_the_protocol():
     """Nothing but ProviderError may leave this module.
 

@@ -113,6 +113,16 @@ class ClaudeProvider:
                 f"output stopped at the {MAX_TOKENS}-token cap (max_tokens); "
                 "raise the cap or narrow the request"
             )
+        if stop_reason == "model_context_window_exceeded":
+            # The other end of the same problem, and checked here for the
+            # same reason: left alone it falls through to the missing-text
+            # branch, which blames the model for a response that was never
+            # produced. Worded so it cannot be read as the cap above — the
+            # input did not fit, and allowing more output does not help.
+            raise ProviderError(
+                "the input exceeded the model's context window "
+                "(model_context_window_exceeded); send a smaller request"
+            )
         if stop_reason == "refusal":
             # `stop_details` is populated only for this stop reason, and is
             # None for every other one — so it is read only inside this branch.
