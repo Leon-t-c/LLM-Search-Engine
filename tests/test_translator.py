@@ -138,3 +138,64 @@ def test_an_unresolvable_sole_condition_refuses_rather_than_clarifies(registry):
     response = translate("problematic widgets", registry, provider, now_year=2026)
     assert response.status == "refused"
     assert response.reason == RefusalReason.FIELD_NOT_IN_SCHEMA
+
+
+def test_the_routers_joins_are_carried_into_the_payload(registry):
+    """A joined field must not cost a retry the router already paid for.
+
+    The router decides the joins and the schema then offers that table's
+    fields, but nothing asks the model to restate the decision. A payload
+    that omits it is not an error, and treating it as one burns the single
+    retry and ends in a refusal that names the wrong cause.
+    """
+    provider = FakeProvider([
+        {"root": "widget", "joins": ["shipment"], "groups": ["Commercial"]},
+        {"root": "widget", "where": {"combinator": "AND",
+          "children": [{"field": "shipment.amount", "op": ">", "value": "$500"}]}},
+    ])
+    response = translate("widgets shipped for over $500", registry, provider, now_year=2026)
+    assert response.status == "ok"
+    assert len(provider.calls) == 2, "no retry should have been needed"
+    assert response.payload.join == ("shipment",)
+
+
+def test_a_join_the_model_supplied_survives_the_seeding(registry):
+    """Seeding is a union: the model's own join is kept and still checked."""
+    provider = FakeProvider([
+        {"root": "widget", "joins": ["shipment"], "groups": ["Commercial"]},
+        {"root": "widget", "join": ["vendor", "shipment"],
+         "where": {"combinator": "AND",
+          "children": [{"field": "shipment.amount", "op": ">", "value": 500}]}},
+    ])
+    response = translate("widgets shipped for over 500", registry, provider, now_year=2026)
+    assert response.status == "ok"
+    assert response.payload.join == ("vendor", "shipment")
+
+
+def test_a_join_shaped_failure_does_not_ask_for_a_different_field(registry):
+    """"Pick another field" is the opposite of the fix when the field is fine."""
+    provider = FakeProvider([
+        {"root": "widget", "joins": [], "groups": ["Commercial"]},
+        {"root": "widget", "where": {"combinator": "AND",
+          "children": [{"field": "shipment.amount", "op": ">", "value": 500}]}},
+        {"root": "widget", "join": ["shipment"], "where": {"combinator": "AND",
+          "children": [{"field": "shipment.amount", "op": ">", "value": 500}]}},
+    ])
+    response = translate("widgets shipped for over 500", registry, provider, now_year=2026)
+    assert response.status == "ok"
+    retry = provider.calls[2]["question"]
+    assert "requires join" in retry
+    assert "`join`" in retry
+    assert "only the offered fields" not in retry
+
+
+def test_an_ordinary_failure_still_asks_for_the_offered_fields(registry):
+    provider = FakeProvider([
+        ROUTE,
+        {"root": "widget", "where": {"combinator": "AND",
+          "children": [{"field": "widget.invented", "op": "=", "value": "A"}]}},
+        {"root": "widget", "where": {"combinator": "AND",
+          "children": [{"field": "widget.status", "op": "=", "value": "X"}]}},
+    ])
+    translate("retired widgets", registry, provider, now_year=2026)
+    assert "only the offered fields" in provider.calls[2]["question"]

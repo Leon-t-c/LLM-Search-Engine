@@ -37,6 +37,18 @@ TRANSLATOR_SYSTEM = (
 #: One retry with the validation error appended, then refuse.
 _MAX_ATTEMPTS = 2
 
+#: Retry guidance, picked by the shape of the failure. A field that merely
+#: needs its table joined *is* in the schema, so the general sentence — use
+#: only the offered fields — points the model away from the fix.
+_RETRY_DEFAULT = "Correct it using only the offered fields and operators."
+_RETRY_JOIN = (
+    "The fields you used are offered. Name the table each one comes from in "
+    "`join` and leave the fields as they are."
+)
+
+#: The marker validation emits for a field that exists but is unjoined.
+_UNJOINED = "requires join"
+
 
 def translate(
     question: str,
@@ -82,15 +94,42 @@ def _translate_stage_two(
             schema_name=f"{root.root}Payload",
         )
         try:
-            return validate_payload(raw, registry), ""
+            proposed = Payload.model_validate(raw)
+            return validate_payload(_with_router_joins(proposed, chosen), registry), ""
         except (PayloadError, ValidationError) as exc:
             problem = str(exc)
+            hint = _RETRY_JOIN if _UNJOINED in problem else _RETRY_DEFAULT
             asked = (
                 f"{question}\n\n"
                 f"Your previous answer failed validation: {problem}\n"
-                "Correct it using only the offered fields and operators."
+                f"{hint}"
             )
     return None, problem
+
+
+def _with_router_joins(payload: Payload, chosen: Route) -> Payload:
+    """Restate on the payload the joins stage 1 already chose.
+
+    The router decides which tables the question needs and the schema then
+    offers their fields, but nothing asks the model to repeat that decision —
+    so a payload using a joined field without naming the join is not a model
+    error. Failing it wastes the one retry and then refuses with a reason that
+    is untrue: the field is in the schema.
+
+    Union rather than overwrite, so a join the model added is kept and still
+    checked against the registry, and the router's are appended in its own
+    order — nothing here depends on iteration order.
+
+    Left alone when the model ignored the schema's single-valued `root`: the
+    router's joins belong to another entity then, and adding them would
+    replace one honest failure with a confusing one.
+    """
+    if payload.root != chosen.root:
+        return payload
+    extra = tuple(t for t in chosen.joins if t not in payload.join)
+    if not extra:
+        return payload
+    return payload.model_copy(update={"join": payload.join + extra})
 
 
 def _without_field(node, key: str):
