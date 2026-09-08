@@ -24,6 +24,10 @@ logger = logging.getLogger(__name__)
 #: flip, so it sits far above any plausible payload. The worst case is still
 #: bounded, which is all the cap was ever for; the expensive side of this
 #: workload is the schema on the way in, not the tokens on the way out.
+#:
+#: Not like-for-like with the Claude adapter, on purpose: its cap is higher,
+#: because adaptive thinking there draws from the same budget as the output.
+#: Whoever reads a comparison of the two should know the caps differ by design.
 MAX_OUTPUT_TOKENS = 8000
 
 #: The request key for the output cap. Current chat models take
@@ -82,6 +86,10 @@ class OpenAIProvider:
         Provider protocol carries. The alternative — widening the protocol with
         a stage argument — would put a provider's cost concern into the
         interface every provider shares, so this stays local to the adapter.
+
+        The Claude adapter has no equivalent: both stages run on one model
+        there. A deliberate difference, and one a cost comparison of the two
+        is therefore not holding constant.
         """
         if schema_name == ROUTE_SCHEMA_NAME and self._router_model:
             return self._router_model
@@ -154,6 +162,10 @@ class OpenAIProvider:
         back out here. Subtracting only the reads leaves the three input keys
         summing past the total, which is the overlap this key set exists to
         rule out.
+
+        `model` is read off the completion, not off the request: the vendor
+        resolves an alias to a dated version, and that is the one that ran and
+        the one a run weeks later should be compared against.
         """
         if self._on_usage is None:
             return
@@ -168,7 +180,7 @@ class OpenAIProvider:
         cache_write = token_count(prompt_detail, "cache_write_tokens")
         record = {
             "schema_name": schema_name,
-            "model": model,
+            "model": getattr(completion, "model", None) or model,
             # Clamped at zero: breakdowns that ever came back larger than
             # the total they belong to would otherwise make the sum negative,
             # which is worse than a slightly wrong split.

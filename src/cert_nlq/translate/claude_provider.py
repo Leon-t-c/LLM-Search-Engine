@@ -18,10 +18,15 @@ DEFAULT_MODEL = "claude-opus-5"
 #: internal tags, and lowering effort cuts cost without either risk.
 DEFAULT_EFFORT = "medium"
 
-#: Server-side rescue when a safety classifier declines a request. Very
-#: unlikely on this workload, but it costs one parameter. This beta gates the
-#: scalar `fallbacks="default"` form specifically; the older list form is
-#: gated by a different, earlier beta, and crossing the two is rejected.
+#: Server-side rescue when a safety classifier declines a request. This beta
+#: gates the scalar `fallbacks="default"` form specifically; the older list
+#: form is gated by a different, earlier beta, and crossing the two is
+#: rejected.
+#:
+#: Off by default, deliberately. It is a production availability feature, and
+#: a fallback means a model other than the requested one may answer — which
+#: silently changes what a comparison run is measuring. Opt in for a deploy
+#: that wants the rescue; leave it off for anything being scored.
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 #: Payloads are small; this is headroom, not a target. The SDK refuses a
@@ -30,6 +35,10 @@ FALLBACK_BETA = "server-side-fallback-2026-07-01"
 #: well under that, and matches the SDK's own non-streaming recommendation,
 #: while leaving adaptive thinking (which spends from this same budget) room
 #: to work rather than being trimmed to just clear the guard.
+#:
+#: Not like-for-like with the other adapter, on purpose: its cap is lower,
+#: because nothing draws reasoning from the same budget there. Whoever reads
+#: a comparison of the two should know the caps differ by design.
 MAX_TOKENS = 16000
 
 #: Caching is opt-in on this platform, where the other vendor's is automatic.
@@ -47,11 +56,16 @@ class ClaudeProvider:
         model: str = DEFAULT_MODEL,
         client=None,
         effort: str = DEFAULT_EFFORT,
-        use_fallbacks: bool = True,
+        use_fallbacks: bool = False,
         on_usage=None,
     ) -> None:
         if client is None and not api_key:
             raise ProviderError("no API key configured for the Claude provider")
+        # Checked alongside the key, and for the same reason as in the other
+        # adapter: a deploy that blanks the model setting would otherwise
+        # build a provider that fails on every call instead of at boot.
+        if not model:
+            raise ProviderError("no model configured for the Claude provider")
         self._model = model
         self._effort = effort
         self._use_fallbacks = use_fallbacks
@@ -70,6 +84,11 @@ class ClaudeProvider:
         # format takes no name and no strict flag — conformance is intrinsic.
         # It is still carried, because the usage record is keyed by stage and
         # the name is the only stage signal the protocol offers.
+        #
+        # Unlike the other adapter, it does not pick a model either: stage 1
+        # runs on the same model as stage 2 here. Another deliberate
+        # difference between the two, and another thing a comparison of them
+        # is not holding constant.
         request = {
             "model": self._model,
             "max_tokens": MAX_TOKENS,
@@ -155,6 +174,11 @@ class ClaudeProvider:
         vendor's input total includes its cached reads and is adjusted there.
         That is what makes a single key summable across a golden set answered
         by both adapters.
+
+        `model` is read off the response, not off the request. With fallbacks
+        enabled a different model can answer, and recording the one that was
+        asked for would attribute its tokens and its answer quality to a model
+        that never ran — undetectably, after the fact.
         """
         if self._on_usage is None:
             return
@@ -164,7 +188,7 @@ class ClaudeProvider:
         output_detail = getattr(usage, "output_tokens_details", None)
         record = {
             "schema_name": schema_name,
-            "model": self._model,
+            "model": getattr(response, "model", None) or self._model,
             "uncached_input_tokens": token_count(usage, "input_tokens"),
             "cached_input_tokens": token_count(usage, "cache_read_input_tokens"),
             "cache_write_tokens": token_count(

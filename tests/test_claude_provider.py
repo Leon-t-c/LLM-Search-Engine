@@ -30,12 +30,15 @@ _DEFAULT_USAGE = SimpleNamespace(input_tokens=120, output_tokens=8)
 class StubMessages:
     def __init__(self, content=(), stop_reason="end_turn",
                  stop_details=None, raises=None, usage=_DEFAULT_USAGE,
-                 response=None):
+                 response=None, model=None):
         self._content = list(content)
         self._stop_reason = stop_reason
         self._stop_details = stop_details
         self._raises = raises
         self._usage = usage
+        #: The model named on the response, which is the one that answered
+        #: and need not be the one that was asked for.
+        self._model = model
         # A whole response object, for the cases where the point is which
         # attributes are *missing* — which a keyword default cannot express.
         self._response = response
@@ -47,12 +50,15 @@ class StubMessages:
             raise self._raises
         if self._response is not None:
             return self._response
-        return SimpleNamespace(
+        response = SimpleNamespace(
             content=self._content,
             stop_reason=self._stop_reason,
             stop_details=self._stop_details,
             usage=self._usage,
         )
+        if self._model is not None:
+            response.model = self._model
+        return response
 
 
 def _client(**kwargs):
@@ -80,30 +86,30 @@ def test_thinking_blocks_are_skipped():
 
 
 def test_the_schema_is_sent_as_a_json_schema_output_format():
-    client, _, beta = _client(content=[_text({"root": "widget"})])
+    client, stable, _ = _client(content=[_text({"root": "widget"})])
     ClaudeProvider("key", client=client).complete("sys", "q", SCHEMA, "Route")
-    fmt = beta.kwargs["output_config"]["format"]
+    fmt = stable.kwargs["output_config"]["format"]
     assert fmt == {"type": "json_schema", "schema": SCHEMA}
 
 
 def test_the_system_prompt_is_top_level_and_the_question_is_the_user_turn():
-    client, _, beta = _client(content=[_text({"root": "widget"})])
+    client, stable, _ = _client(content=[_text({"root": "widget"})])
     ClaudeProvider("key", client=client).complete("be terse", "how many", SCHEMA, "R")
-    assert beta.kwargs["system"] == "be terse"
-    assert beta.kwargs["messages"] == [{"role": "user", "content": "how many"}]
+    assert stable.kwargs["system"] == "be terse"
+    assert stable.kwargs["messages"] == [{"role": "user", "content": "how many"}]
 
 
 def test_effort_is_set_and_defaults_below_high():
     """Translation is mechanical; the default `high` buys nothing here."""
-    client, _, beta = _client(content=[_text({"root": "widget"})])
+    client, stable, _ = _client(content=[_text({"root": "widget"})])
     ClaudeProvider("key", client=client).complete("sys", "q", SCHEMA, "R")
-    assert beta.kwargs["output_config"]["effort"] == "medium"
+    assert stable.kwargs["output_config"]["effort"] == "medium"
 
 
 def test_the_default_model_is_opus_5():
-    client, _, beta = _client(content=[_text({"root": "widget"})])
+    client, stable, _ = _client(content=[_text({"root": "widget"})])
     ClaudeProvider("key", client=client).complete("sys", "q", SCHEMA, "R")
-    assert beta.kwargs["model"] == DEFAULT_MODEL == "claude-opus-5"
+    assert stable.kwargs["model"] == DEFAULT_MODEL == "claude-opus-5"
 
 
 def test_fallbacks_use_the_beta_endpoint():
@@ -117,7 +123,7 @@ def test_fallbacks_use_the_beta_endpoint():
 
 
 def test_disabling_fallbacks_uses_the_stable_endpoint():
-    """Escape hatch if the beta path rejects output_config."""
+    """The default path, and the escape hatch if the beta rejects output_config."""
     client, stable, beta = _client(content=[_text({"root": "widget"})])
     ClaudeProvider("key", client=client, use_fallbacks=False).complete(
         "sys", "q", SCHEMA, "R"
@@ -166,25 +172,25 @@ def test_the_output_cap_reaches_the_request():
     """A required argument: without it a real client rejects the call."""
     from cert_nlq.translate.claude_provider import MAX_TOKENS
 
-    client, _, beta = _client(content=[_text({"root": "widget"})])
+    client, stable, _ = _client(content=[_text({"root": "widget"})])
     ClaudeProvider("key", client=client).complete("sys", "q", SCHEMA, "R")
-    assert beta.kwargs["max_tokens"] == MAX_TOKENS
+    assert stable.kwargs["max_tokens"] == MAX_TOKENS
 
 
 def test_caching_is_requested_explicitly():
     """This vendor's caching is opt-in, so the stable prefix buys nothing
     unless it is asked for — and the system prompt is the bulk of the call."""
-    client, _, beta = _client(content=[_text({"root": "widget"})])
-    ClaudeProvider("key", client=client).complete("sys", "q", SCHEMA, "R")
-    assert beta.kwargs["cache_control"] == {"type": "ephemeral"}
-
-
-def test_caching_is_requested_on_the_stable_endpoint_too():
     client, stable, _ = _client(content=[_text({"root": "widget"})])
-    ClaudeProvider("key", client=client, use_fallbacks=False).complete(
+    ClaudeProvider("key", client=client).complete("sys", "q", SCHEMA, "R")
+    assert stable.kwargs["cache_control"] == {"type": "ephemeral"}
+
+
+def test_caching_is_requested_on_the_fallback_endpoint_too():
+    client, _, beta = _client(content=[_text({"root": "widget"})])
+    ClaudeProvider("key", client=client, use_fallbacks=True).complete(
         "sys", "q", SCHEMA, "R"
     )
-    assert stable.kwargs["cache_control"] == {"type": "ephemeral"}
+    assert beta.kwargs["cache_control"] == {"type": "ephemeral"}
 
 
 def test_usage_is_reported_to_the_callback():
@@ -344,3 +350,50 @@ def test_a_response_with_no_usage_attribute_at_all_does_not_fail_the_call():
     provider = ClaudeProvider("key", client=client, on_usage=seen.append)
     assert provider.complete("sys", "q", SCHEMA, "R") == {"root": "widget"}
     assert seen == []
+
+
+def test_fallbacks_are_off_by_default():
+    """A fallback changes which model answers, so a run must opt into it.
+
+    It is an availability feature, not a measurement one: leaving it on by
+    default lets a substitute answer part of a comparison set without anyone
+    choosing that.
+    """
+    client, stable, beta = _client(content=[_text({"root": "widget"})])
+    ClaudeProvider("key", client=client).complete("sys", "q", SCHEMA, "R")
+    assert beta.kwargs is None
+    assert "fallbacks" not in stable.kwargs
+    assert "betas" not in stable.kwargs
+
+
+def test_usage_reports_the_model_that_answered():
+    """With fallbacks on, a substitute may answer; the record must name it.
+
+    Reporting the requested model instead attributes another model's tokens
+    and another model's answer quality to the one under test, and nothing
+    downstream can tell after the fact.
+    """
+    seen = []
+    client, _, _ = _client(
+        content=[_text({"root": "widget"})], model="substitute-model"
+    )
+    ClaudeProvider(
+        "key", client=client, use_fallbacks=True, on_usage=seen.append
+    ).complete("sys", "q", SCHEMA, "R")
+    assert seen[0]["model"] == "substitute-model"
+
+
+def test_usage_falls_back_to_the_requested_model():
+    """A response that names no model still has to price against something."""
+    seen = []
+    client, _, _ = _client(content=[_text({"root": "widget"})])
+    ClaudeProvider("key", client=client, on_usage=seen.append).complete(
+        "sys", "q", SCHEMA, "R"
+    )
+    assert seen[0]["model"] == DEFAULT_MODEL
+
+
+def test_a_blank_model_fails_at_construction():
+    """Mirrors the other adapter: a blank setting must not build a provider."""
+    with pytest.raises(ProviderError, match="no model"):
+        ClaudeProvider("key", "")

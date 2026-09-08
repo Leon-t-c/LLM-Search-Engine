@@ -18,13 +18,17 @@ class StubCompletions:
     """Records the call and returns a scripted message."""
 
     def __init__(self, content=None, refusal=None, raises=None,
-                 usage=_DEFAULT_USAGE, finish_reason="stop", choices=None):
+                 usage=_DEFAULT_USAGE, finish_reason="stop", choices=None,
+                 model=None):
         self._content = content
         self._refusal = refusal
         self._raises = raises
         self._usage = usage
         self._finish_reason = finish_reason
         self._choices = choices
+        #: The model named on the completion: the resolved, dated version of
+        #: whatever alias was requested.
+        self._model = model
         self.kwargs = None
 
     def create(self, **kwargs):
@@ -37,7 +41,10 @@ class StubCompletions:
             choices = [SimpleNamespace(
                 message=message, finish_reason=self._finish_reason
             )]
-        return SimpleNamespace(choices=choices, usage=self._usage)
+        completion = SimpleNamespace(choices=choices, usage=self._usage)
+        if self._model is not None:
+            completion.model = self._model
+        return completion
 
 
 def _client(**kwargs):
@@ -302,3 +309,27 @@ def test_a_blank_model_fails_at_construction():
     """The setting defaults to blank, so a key-only deploy must not build."""
     with pytest.raises(ProviderError, match="no model"):
         OpenAIProvider("key", "")
+
+
+def test_usage_reports_the_model_that_answered():
+    """An alias resolves to a dated version; the record must carry that one.
+
+    Priced runs are compared across weeks, and the alias silently moves.
+    """
+    seen = []
+    client, _ = _client(
+        content=json.dumps({"root": "widget"}), model="test-model-2026-01-01"
+    )
+    OpenAIProvider("key", "test-model", client=client, on_usage=seen.append).complete(
+        "sys", "q", SCHEMA, "Route"
+    )
+    assert seen[0]["model"] == "test-model-2026-01-01"
+
+
+def test_usage_falls_back_to_the_requested_model():
+    seen = []
+    client, _ = _client(content=json.dumps({"root": "widget"}))
+    OpenAIProvider("key", "test-model", client=client, on_usage=seen.append).complete(
+        "sys", "q", SCHEMA, "Route"
+    )
+    assert seen[0]["model"] == "test-model"
