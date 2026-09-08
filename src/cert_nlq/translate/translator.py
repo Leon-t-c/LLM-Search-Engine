@@ -195,8 +195,12 @@ def _clarify(
         kept = _without_field(kept, unresolved_key)
     vocabulary = spec.vocabulary if spec is not None else ()
     if not vocabulary or kept is None:
+        # Not FIELD_NOT_IN_SCHEMA: the field is in the schema and the payload
+        # validated. Either it has no closed vocabulary to offer as
+        # candidates, or pruning the unresolved values left nothing for the
+        # caller's builder — both are the value failing, not the field.
         return Refused(
-            reason=RefusalReason.FIELD_NOT_IN_SCHEMA,
+            reason=RefusalReason.VALUE_NOT_UNDERSTOOD,
             detail=f"Could not work out what {phrase!r} means here.",
         )
     candidates = tuple(

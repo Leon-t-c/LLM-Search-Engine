@@ -72,3 +72,18 @@ def test_ambiguous_is_not_a_refusal_reason():
 def test_needs_aggregation_is_not_a_refusal_reason():
     """Aggregation is a core requirement carried by the IR, not an edge case."""
     assert "needs_aggregation" not in {r.value for r in RefusalReason}
+
+
+def test_join_not_available_stays_in_the_shared_vocabulary():
+    """Nothing here constructs it, and that is the design, not an oversight.
+
+    The router drops a join the registry does not list rather than refusing,
+    because an over-broad slice still answers the question. The reason stays
+    in the closed set for the host, which can hit the case for real.
+    """
+    assert "join_not_available" in {r.value for r in RefusalReason}
+
+
+def test_a_value_that_cannot_be_resolved_has_its_own_reason():
+    """A money amount that will not parse is not a missing field."""
+    assert "value_not_understood" in {r.value for r in RefusalReason}

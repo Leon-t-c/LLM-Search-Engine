@@ -152,7 +152,11 @@ def test_a_candidate_keeps_the_operator_it_was_asked_under(registry):
 
 
 def test_an_unresolvable_sole_condition_refuses_rather_than_clarifies(registry):
-    """With nothing left to populate the builder, a clarification is empty."""
+    """With nothing left to populate the builder, a clarification is empty.
+
+    The reason names the value, not the field: `widget.status` is in the
+    schema, and saying otherwise sends a reader after the wrong bug.
+    """
     provider = FakeProvider([
         ROUTE,
         {"root": "widget", "where": {"combinator": "AND",
@@ -160,7 +164,7 @@ def test_an_unresolvable_sole_condition_refuses_rather_than_clarifies(registry):
     ])
     response = translate("problematic widgets", registry, provider, now_year=2026)
     assert response.status == "refused"
-    assert response.reason == RefusalReason.FIELD_NOT_IN_SCHEMA
+    assert response.reason == RefusalReason.VALUE_NOT_UNDERSTOOD
 
 
 def test_the_routers_joins_are_carried_into_the_payload(registry):
@@ -262,3 +266,33 @@ def test_nothing_survives_the_pruning_so_it_refuses(registry):
     ])
     response = translate("odd widgets", registry, provider, now_year=2026)
     assert response.status == "refused"
+    assert response.reason == RefusalReason.VALUE_NOT_UNDERSTOOD
+
+
+def test_a_value_with_no_vocabulary_to_offer_refuses_as_not_understood(registry):
+    """An unparseable amount is not a field missing from the schema.
+
+    There is no closed vocabulary to offer as candidates, so there is nothing
+    to clarify with and it refuses — but the reason has to say what actually
+    happened, or every value failure looks like a schema failure.
+    """
+    provider = FakeProvider([
+        {"root": "widget", "joins": [],
+         "groups": ["Commercial", "Location & Identity"]},
+        {"root": "widget", "where": {"combinator": "AND", "children": [
+            {"field": "widget.serial", "op": "=", "value": 7},
+            {"field": "widget.price", "op": ">", "value": "a fair whack"},
+        ]}},
+    ])
+    response = translate("pricey widget 7", registry, provider, now_year=2026)
+    assert response.status == "refused"
+    assert response.reason == RefusalReason.VALUE_NOT_UNDERSTOOD
+
+
+def test_a_validation_failure_still_refuses_as_field_not_in_schema(registry):
+    """The reason stays put for the case it actually describes."""
+    bad = {"root": "widget", "where": {"combinator": "AND",
+            "children": [{"field": "widget.invented", "op": "=", "value": "A"}]}}
+    provider = FakeProvider([ROUTE, bad, bad])
+    response = translate("nonsense", registry, provider, now_year=2026)
+    assert response.reason == RefusalReason.FIELD_NOT_IN_SCHEMA
