@@ -18,11 +18,13 @@ class StubCompletions:
     """Records the call and returns a scripted message."""
 
     def __init__(self, content=None, refusal=None, raises=None,
-                 usage=_DEFAULT_USAGE):
+                 usage=_DEFAULT_USAGE, finish_reason="stop", choices=None):
         self._content = content
         self._refusal = refusal
         self._raises = raises
         self._usage = usage
+        self._finish_reason = finish_reason
+        self._choices = choices
         self.kwargs = None
 
     def create(self, **kwargs):
@@ -30,9 +32,12 @@ class StubCompletions:
         if self._raises is not None:
             raise self._raises
         message = SimpleNamespace(content=self._content, refusal=self._refusal)
-        return SimpleNamespace(
-            choices=[SimpleNamespace(message=message)], usage=self._usage
-        )
+        choices = self._choices
+        if choices is None:
+            choices = [SimpleNamespace(
+                message=message, finish_reason=self._finish_reason
+            )]
+        return SimpleNamespace(choices=choices, usage=self._usage)
 
 
 def _client(**kwargs):
@@ -77,7 +82,7 @@ def test_output_is_capped():
 
     client, completions = _client(content=json.dumps({"root": "widget"}))
     OpenAIProvider("key", "m", client=client).complete("sys", "q", SCHEMA, "R")
-    assert completions.kwargs[OUTPUT_TOKEN_PARAM] == MAX_OUTPUT_TOKENS == 1500
+    assert completions.kwargs[OUTPUT_TOKEN_PARAM] == MAX_OUTPUT_TOKENS == 8000
 
 
 def test_stage_one_uses_the_cheaper_router_model():
@@ -116,7 +121,8 @@ def test_usage_is_reported_to_the_callback():
     provider = OpenAIProvider("key", "m", client=client, on_usage=seen.append)
     provider.complete("sys", "q", SCHEMA, "Route")
     assert seen == [{"schema_name": "Route", "model": "m",
-                     "prompt_tokens": 120, "completion_tokens": 8}]
+                     "prompt_tokens": 120, "completion_tokens": 8,
+                     "cached_tokens": None, "reasoning_tokens": None}]
 
 
 def test_a_missing_usage_field_does_not_break_the_call():
@@ -148,3 +154,73 @@ def test_an_upstream_exception_becomes_a_provider_error():
 def test_a_missing_api_key_fails_at_construction():
     with pytest.raises(ProviderError, match="no API key"):
         OpenAIProvider("", "m")
+
+
+def test_an_empty_choices_list_stays_inside_the_protocol():
+    """Nothing but ProviderError may leave this module."""
+    client, _ = _client(choices=[])
+    with pytest.raises(ProviderError, match="no choices"):
+        OpenAIProvider("key", "m", client=client).complete("sys", "q", SCHEMA, "R")
+
+
+def test_a_malformed_choice_stays_inside_the_protocol():
+    client, _ = _client(choices=[SimpleNamespace()])
+    with pytest.raises(ProviderError, match="no choices"):
+        OpenAIProvider("key", "m", client=client).complete("sys", "q", SCHEMA, "R")
+
+
+def test_a_raising_usage_callback_does_not_fail_the_call():
+    """The callback is a log handler in production; a broken one is not a 500."""
+    def explode(record):
+        raise RuntimeError("the log handler is misconfigured")
+
+    client, _ = _client(content=json.dumps({"root": "widget"}))
+    provider = OpenAIProvider("key", "m", client=client, on_usage=explode)
+    assert provider.complete("sys", "q", SCHEMA, "R") == {"root": "widget"}
+
+
+def test_a_truncated_response_names_the_cap_not_the_json():
+    """Reporting a cut-off response as bad JSON sends the reader elsewhere."""
+    from cert_nlq.translate.openai_provider import (
+        MAX_OUTPUT_TOKENS,
+        OUTPUT_TOKEN_PARAM,
+    )
+
+    client, _ = _client(content='{"root": "wid', finish_reason="length")
+    with pytest.raises(ProviderError) as caught:
+        OpenAIProvider("key", "m", client=client).complete("sys", "q", SCHEMA, "R")
+    message = str(caught.value)
+    assert str(MAX_OUTPUT_TOKENS) in message
+    assert OUTPUT_TOKEN_PARAM in message
+    assert "JSON" not in message
+
+
+def test_cached_and_reasoning_counts_reach_the_record():
+    """`prompt_tokens` includes cached tokens, which bill differently."""
+    usage = SimpleNamespace(
+        prompt_tokens=120,
+        completion_tokens=8,
+        prompt_tokens_details=SimpleNamespace(cached_tokens=64),
+        completion_tokens_details=SimpleNamespace(reasoning_tokens=5),
+    )
+    seen = []
+    client, _ = _client(content=json.dumps({"root": "widget"}), usage=usage)
+    OpenAIProvider("key", "m", client=client, on_usage=seen.append).complete(
+        "sys", "q", SCHEMA, "R"
+    )
+    assert seen[0]["cached_tokens"] == 64
+    assert seen[0]["reasoning_tokens"] == 5
+
+
+def test_absent_detail_blocks_do_not_break_the_call():
+    """Both detail objects are optional on the response."""
+    usage = SimpleNamespace(
+        prompt_tokens=120, completion_tokens=8,
+        prompt_tokens_details=None, completion_tokens_details=None,
+    )
+    seen = []
+    client, _ = _client(content=json.dumps({"root": "widget"}), usage=usage)
+    provider = OpenAIProvider("key", "m", client=client, on_usage=seen.append)
+    assert provider.complete("sys", "q", SCHEMA, "R") == {"root": "widget"}
+    assert seen[0]["cached_tokens"] is None
+    assert seen[0]["reasoning_tokens"] is None

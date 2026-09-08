@@ -9,12 +9,21 @@ stable message prefix so automatic prompt caching can hit, and usage
 accounting on every call.
 """
 import json
+import logging
 
 from .provider import ProviderError
 from .router import ROUTE_SCHEMA_NAME
 
-#: Payloads are a few hundred tokens. This is headroom, not a target.
-MAX_OUTPUT_TOKENS = 1500
+logger = logging.getLogger(__name__)
+
+#: Payloads are a few hundred tokens, so this is headroom rather than a
+#: target — but on the reasoning-model families this task targets, the cap
+#: counts reasoning tokens too, and those are not bounded by payload size. A
+#: cap that a single ordinary call can hit is not a safety net, it is a coin
+#: flip, so it sits far above any plausible payload. The worst case is still
+#: bounded, which is all the cap was ever for; the expensive side of this
+#: workload is the schema on the way in, not the tokens on the way out.
+MAX_OUTPUT_TOKENS = 8000
 
 #: The request key for the output cap. Current chat models take
 #: `max_completion_tokens`; older ones take `max_tokens`. If a live call
@@ -81,16 +90,32 @@ class OpenAIProvider:
         }
         try:
             completion = self._client.chat.completions.create(**request)
-        except ProviderError:
-            raise
         except Exception as exc:
             raise ProviderError(str(exc)) from exc
 
         self._report_usage(completion, model, schema_name)
 
-        message = completion.choices[0].message
+        # Unpacked defensively: an empty list is an IndexError and a
+        # half-formed object an AttributeError, and neither is a
+        # ProviderError, so either would escape this module and surface
+        # above as an undifferentiated failure.
+        try:
+            choice = completion.choices[0]
+            message = choice.message
+        except (AttributeError, IndexError, TypeError) as exc:
+            raise ProviderError("no choices in the response") from exc
+
         if getattr(message, "refusal", None):
             raise ProviderError(f"model refused: {message.refusal}")
+        if getattr(choice, "finish_reason", None) == "length":
+            # Checked before parsing: truncated output is not valid JSON
+            # either, and reporting it that way sends the reader looking for
+            # a malformed model instead of a cap to raise. Name both the
+            # number and the parameter, so the message is the whole fix.
+            raise ProviderError(
+                f"output stopped at the {self._max_output_tokens}-token cap "
+                f"({OUTPUT_TOKEN_PARAM}); raise the cap or narrow the request"
+            )
         try:
             return json.loads(message.content)
         except (TypeError, ValueError) as exc:
@@ -103,9 +128,24 @@ class OpenAIProvider:
         usage = getattr(completion, "usage", None)
         if usage is None:
             return
-        self._on_usage({
+        # `prompt_tokens` is inclusive of the cached ones, which bill at a
+        # discount, so the plain pair cannot price a call. Both detail
+        # objects are optional on the response and each field inside them
+        # is too, hence the layered getattr.
+        prompt_detail = getattr(usage, "prompt_tokens_details", None)
+        output_detail = getattr(usage, "completion_tokens_details", None)
+        record = {
             "schema_name": schema_name,
             "model": model,
             "prompt_tokens": getattr(usage, "prompt_tokens", None),
             "completion_tokens": getattr(usage, "completion_tokens", None),
-        })
+            "cached_tokens": getattr(prompt_detail, "cached_tokens", None),
+            "reasoning_tokens": getattr(output_detail, "reasoning_tokens", None),
+        }
+        try:
+            self._on_usage(record)
+        except Exception:
+            # The callback is a logging call in production. A misconfigured
+            # handler must not turn a translation that already succeeded
+            # into a failure.
+            logger.exception("usage callback failed")
