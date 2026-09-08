@@ -281,13 +281,15 @@ def test_the_generated_schema_meets_the_strict_subset(registry):
     """
     schema = json_schema_for(registry.root("widget"))
     nodes = list(_walk(schema))
+    objects = [n for n in nodes if _is_object(n)]
+    # Otherwise a walker that visited nothing would satisfy every `== []`
+    # assertion below.
+    assert objects, "expected the walk to find objects to check"
 
-    open_objects = [n for n in nodes if _is_object(n) and n.get("additionalProperties") is not False]
+    open_objects = [n for n in objects if n.get("additionalProperties") is not False]
     assert open_objects == [], f"objects left open: {len(open_objects)}"
 
-    for node in nodes:
-        if not _is_object(node):
-            continue
+    for node in objects:
         properties = list(node.get("properties") or ())
         assert list(node.get("required") or ()) == properties, (
             f"required does not cover properties: {node.get('required')} "
@@ -326,7 +328,9 @@ def test_closing_the_schema_does_not_change_what_is_accepted(registry):
 def test_the_strict_pass_leaves_every_hoisted_ref_bare(registry):
     """Closing the objects must not add a sibling beside a `$ref`."""
     schema = json_schema_for(registry.root("widget"))
-    offenders = [n for n in _walk(schema) if "$ref" in n and set(n) != {"$ref"}]
+    nodes = list(_walk(schema))
+    assert [n for n in nodes if "$ref" in n], "expected at least one hoisted enum"
+    offenders = [n for n in nodes if "$ref" in n and set(n) != {"$ref"}]
     assert offenders == []
 
 
@@ -352,3 +356,85 @@ def test_a_fixed_value_is_expressed_as_a_single_value_enum(registry):
 def test_the_single_valued_slot_names_exactly_the_one_legal_value(registry):
     schema = json_schema_for(registry.root("widget"))
     assert schema["properties"]["root"] == {"enum": ["widget"], "type": "string"}
+
+
+def test_the_strict_pass_treats_a_property_map_as_data_not_as_a_schema():
+    """A field must survive whatever it happens to be called.
+
+    Walking every dict value makes a property's *name* collide with a schema
+    keyword: one called `title` is dropped and one called `properties` has
+    the closing keywords injected into it. Nothing in the registry hits this
+    today; a generator that silently drops a field by name is the wrong thing
+    to leave lying around.
+    """
+    from cert_nlq.ir.schema import strictify
+
+    result = strictify({
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "default": {"type": "string"},
+            "properties": {"type": "string"},
+        },
+    })
+    assert set(result["properties"]) == {"title", "default", "properties"}
+    assert result["properties"]["properties"] == {"type": "string"}
+    assert result["required"] == ["title", "default", "properties"]
+
+
+def test_the_strict_pass_still_strips_the_keywords_where_they_are_keywords():
+    from cert_nlq.ir.schema import strictify
+
+    result = strictify({
+        "type": "object",
+        "title": "Decoration",
+        "properties": {"a": {"type": "string", "title": "A", "default": "x"}},
+    })
+    assert "title" not in result
+    assert result["properties"]["a"] == {"type": "string"}
+
+
+def test_the_strict_pass_reaches_every_schema_position():
+    from cert_nlq.ir.schema import strictify
+
+    inner = {"type": "object", "title": "drop me",
+             "properties": {"a": {"type": "string"}}}
+    result = strictify({
+        "$defs": {"D": dict(inner)},
+        "type": "object",
+        "properties": {
+            "one": {"type": "array", "items": dict(inner)},
+            "two": {"anyOf": [dict(inner), {"type": "null"}]},
+            "three": {"oneOf": [dict(inner)]},
+            "four": {"allOf": [dict(inner)]},
+            "five": {"type": "array", "prefixItems": [dict(inner)]},
+        },
+    })
+    reached = [
+        result["$defs"]["D"],
+        result["properties"]["one"]["items"],
+        result["properties"]["two"]["anyOf"][0],
+        result["properties"]["three"]["oneOf"][0],
+        result["properties"]["four"]["allOf"][0],
+        result["properties"]["five"]["prefixItems"][0],
+    ]
+    assert len(reached) == 6
+    for node in reached:
+        assert "title" not in node
+        assert node["additionalProperties"] is False
+        assert node["required"] == ["a"]
+
+
+def test_an_object_with_no_properties_gets_no_required_list():
+    """An empty `required` is not what either vendor's own pass emits."""
+    from cert_nlq.ir.schema import strictify
+
+    result = strictify({"type": "object"})
+    assert result["additionalProperties"] is False
+    assert "required" not in result
+
+
+def test_the_strict_pass_leaves_a_bare_ref_bare():
+    from cert_nlq.ir.schema import strictify
+
+    assert strictify({"$ref": "#/$defs/X"}) == {"$ref": "#/$defs/X"}

@@ -196,6 +196,12 @@ def dedupe_enums(schema: dict) -> dict:
     return result
 
 
+#: Keys whose value is a *list* of schemas. Descended into positionally, so
+#: a property that happens to share one of these names is never mistaken for
+#: a schema keyword.
+_SCHEMA_BRANCH_KEYS = ("anyOf", "oneOf", "allOf", "prefixItems")
+
+
 def strictify(node):
     """Rewrite a generated schema into the subset the providers accept.
 
@@ -205,12 +211,16 @@ def strictify(node):
     the documented way to say "may be absent" in a closed schema — the model
     then has to state the absence rather than omit the key.
 
+    The walk descends into named schema positions rather than over every
+    dict value, because the two are not the same thing: `properties` and
+    `$defs` are maps whose *keys* are names, not keywords. Walking them as
+    schemas would delete a property called `title` and inject the closing
+    keywords into one called `properties`, corrupting the parent.
+
     Done here rather than in each adapter so the two cannot drift, and so the
     shape can be asserted offline. Nothing else consumes this output:
     payload validation runs off the models, not the schema.
     """
-    if isinstance(node, list):
-        return [strictify(child) for child in node]
     if not isinstance(node, dict):
         return node
 
@@ -220,7 +230,7 @@ def strictify(node):
     # `$ref` stays bare: nothing below adds a key to a node that declares
     # neither `type: object` nor `properties`.
     rewritten = {
-        key: strictify(value)
+        key: value
         for key, value in node.items()
         if key not in ("default", "title")
     }
@@ -232,11 +242,33 @@ def strictify(node):
         # the same thing, is on both vendors' lists, and keeps any sibling
         # `type`.
         rewritten["enum"] = [rewritten.pop("const")]
+
+    definitions = rewritten.get("$defs")
+    if isinstance(definitions, dict):
+        rewritten["$defs"] = {
+            name: strictify(child) for name, child in definitions.items()
+        }
+    items = rewritten.get("items")
+    if isinstance(items, dict):
+        rewritten["items"] = strictify(items)
+    for key in _SCHEMA_BRANCH_KEYS:
+        branches = rewritten.get(key)
+        if isinstance(branches, list):
+            rewritten[key] = [strictify(branch) for branch in branches]
+
     properties = rewritten.get("properties")
+    if isinstance(properties, dict):
+        rewritten["properties"] = {
+            name: strictify(child) for name, child in properties.items()
+        }
+
     if rewritten.get("type") != "object" and not isinstance(properties, dict):
         return rewritten
     rewritten["additionalProperties"] = False
-    rewritten["required"] = list(properties or {})
+    if isinstance(properties, dict):
+        # An object with no `properties` gets no `required` at all — an empty
+        # list is not what either vendor's own pass emits.
+        rewritten["required"] = list(properties)
     return rewritten
 
 
