@@ -93,7 +93,7 @@ def test_registry_unavailable_is_a_503(registry):
         registry, [], error=RegistryUnavailable("registry returned 503")
     ).post("/translate", json={"question": "active widgets"})
     assert response.status_code == 503
-    assert "registry" in response.json()["detail"].lower()
+    assert "temporarily unavailable" in response.json()["detail"].lower()
 
 
 def test_provider_failure_is_a_502(registry):
@@ -102,6 +102,21 @@ def test_provider_failure_is_a_502(registry):
     )
     assert response.status_code == 502
     assert "provider" in response.json()["detail"].lower()
+
+
+def test_a_registry_failure_does_not_echo_its_internals(registry):
+    """The body must not carry whatever the registry error happened to say.
+
+    A malformed registry produces a validation error naming fields and
+    values from the host's own document. That is exactly the knowledge this
+    service is built not to hold, let alone hand out.
+    """
+    marker = "zzz_marker_field_path_should_not_leak"
+    response = _client(
+        registry, [], error=RegistryUnavailable(f"registry document is malformed: {marker}")
+    ).post("/translate", json={"question": "active widgets"})
+    assert response.status_code == 503
+    assert marker not in response.text
 
 
 def test_healthz_reports_the_cached_registry_version(registry):

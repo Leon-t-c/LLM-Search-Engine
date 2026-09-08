@@ -3,6 +3,8 @@
 Dependencies are passed to create_app explicitly rather than imported, so
 tests construct an app that cannot reach the network.
 """
+import logging
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
@@ -10,6 +12,8 @@ from ..config import get_settings
 from ..registry.client import RegistryClient, RegistryUnavailable
 from ..translate.provider import Provider, ProviderError
 from ..translate.translator import translate
+
+logger = logging.getLogger(__name__)
 
 
 class TranslateRequest(BaseModel):
@@ -41,16 +45,24 @@ def create_app(registry_client, provider: Provider) -> FastAPI:
         try:
             registry = registry_client.fetch()
         except RegistryUnavailable as exc:
+            # The exception text can carry field paths and values straight
+            # out of the host's registry document (a validation error
+            # stringifies with that detail). This service is built to hold
+            # no schema knowledge, so that text is logged, never returned.
+            logger.exception("registry unavailable")
             raise HTTPException(
-                status_code=503, detail=f"Registry unavailable: {exc}"
+                status_code=503,
+                detail="The query service is temporarily unavailable.",
             ) from exc
         try:
             response = translate(
                 request.question, registry, provider, now_year=request.now_year
             )
         except ProviderError as exc:
+            logger.exception("translation provider failed")
             raise HTTPException(
-                status_code=502, detail=f"Translation provider failed: {exc}"
+                status_code=502,
+                detail="The translation provider is temporarily unavailable.",
             ) from exc
         # `by_alias=True` is REQUIRED, not cosmetic. `Aggregate.alias` is
         # serialised as `as` (a Python keyword), and without the flag this
