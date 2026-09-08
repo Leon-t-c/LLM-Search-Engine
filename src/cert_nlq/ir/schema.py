@@ -35,7 +35,7 @@ class ScopeError(ValueError):
 #: Levels of grouping the generated schema offers. Finite by construction —
 #: Group1 holds conditions only, GroupN holds conditions or Group(N-1) — so
 #: nothing is self-referential and no provider depth limit applies. Measured:
-#: two extra levels cost about 600 bytes on a 110-field slice.
+#: two extra levels cost about 600 bytes on a representative slice.
 MAX_GROUP_DEPTH = 3
 
 

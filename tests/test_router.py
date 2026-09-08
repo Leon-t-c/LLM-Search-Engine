@@ -48,7 +48,7 @@ def test_route_prompt_lists_groups_in_registry_order(registry):
 
 
 def test_the_field_label_sample_is_capped(registry):
-    """A 62-field group must not paste 62 labels into every routing call."""
+    """A large group must not paste every one of its labels into the call."""
     from cert_nlq.translate.router import MAX_SAMPLE_LABELS, sample_labels
 
     root = registry.root("widget")
