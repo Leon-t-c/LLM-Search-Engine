@@ -13,6 +13,8 @@ class Settings(BaseSettings):
     registry_token: str = ""
     openai_api_key: str = ""
     model: str = ""
+    #: Cheaper model for stage-1 routing. Falls back to `model` when blank.
+    router_model: str = ""
 
 
 @lru_cache

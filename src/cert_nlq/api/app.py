@@ -113,14 +113,23 @@ def make_app() -> FastAPI:
 
         uvicorn cert_nlq.api.app:make_app --factory
 
-    The provider import is inside the function because that provider module
-    does not exist yet in this codebase. Nothing calls `make_app` until it
-    does.
+    The provider import is inside the function so that importing this module
+    never pulls in a vendor SDK, and never constructs a client.
     """
     settings = get_settings()
     from ..translate.openai_provider import OpenAIProvider
 
+    # Every call leaves one `usage {...}` line carrying the stage, the model
+    # and both token counts. That log is the running cost record — the thing
+    # that is miserable to reconstruct after the fact.
+    usage_log = logging.getLogger("cert_nlq.usage")
+
     return create_app(
         RegistryClient(settings.registry_url, settings.registry_token),
-        OpenAIProvider(settings.openai_api_key, settings.model),
+        OpenAIProvider(
+            settings.openai_api_key,
+            settings.model,
+            router_model=settings.router_model or None,
+            on_usage=lambda record: usage_log.info("usage %s", record),
+        ),
     )

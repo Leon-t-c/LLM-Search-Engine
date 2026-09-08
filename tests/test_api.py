@@ -194,3 +194,19 @@ def test_importing_the_app_module_builds_no_provider():
 
     assert not hasattr(module, "app"), "make_app must not be called at import"
     assert callable(module.make_app)
+
+
+def test_make_app_builds_without_calling_the_api(monkeypatch):
+    """Constructing the client issues no request, so this is free."""
+    from cert_nlq.api.app import make_app
+    from cert_nlq.config import get_settings
+
+    monkeypatch.setenv("CERT_NLQ_REGISTRY_URL", "https://cert.example")
+    monkeypatch.setenv("CERT_NLQ_REGISTRY_TOKEN", "t")
+    monkeypatch.setenv("CERT_NLQ_OPENAI_API_KEY", "sk-not-a-real-key")
+    monkeypatch.setenv("CERT_NLQ_MODEL", "test-model")
+    get_settings.cache_clear()
+    try:
+        assert make_app().title == "cert-nlq"
+    finally:
+        get_settings.cache_clear()
