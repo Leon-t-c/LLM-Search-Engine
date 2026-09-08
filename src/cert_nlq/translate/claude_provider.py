@@ -95,7 +95,17 @@ class ClaudeProvider:
 
         self._report_usage(response, schema_name)
 
-        if response.stop_reason == "max_tokens":
+        # Everything below is read defensively. This module's one contract is
+        # that nothing but ProviderError leaves it, and the HTTP layer above
+        # catches only that — so an AttributeError or a TypeError on a
+        # half-formed response object would escape as a bare 500 with no
+        # indication of which field was missing.
+        stop_reason = getattr(response, "stop_reason", None)
+        if stop_reason is None:
+            # Non-streaming responses always carry one, so its absence means
+            # the object is not the shape this adapter was written against.
+            raise ProviderError("response carried no stop_reason")
+        if stop_reason == "max_tokens":
             # Checked before the text is parsed: a truncated payload is not
             # valid JSON either, and saying so sends the reader hunting for a
             # malformed model instead of a cap to raise.
@@ -103,20 +113,23 @@ class ClaudeProvider:
                 f"output stopped at the {MAX_TOKENS}-token cap (max_tokens); "
                 "raise the cap or narrow the request"
             )
-        if response.stop_reason == "refusal":
+        if stop_reason == "refusal":
             # `stop_details` is populated only for this stop reason, and is
             # None for every other one — so it is read only inside this branch.
             details = getattr(response, "stop_details", None)
             category = getattr(details, "category", None)
             raise ProviderError(f"model refused: {category or 'unspecified'}")
 
+        blocks = getattr(response, "content", None)
+        if not isinstance(blocks, (list, tuple)):
+            raise ProviderError("response carried no content blocks")
         # Adaptive thinking is on by default, so a thinking block may lead.
         text = next(
-            (b.text for b in response.content
+            (getattr(b, "text", None) for b in blocks
              if getattr(b, "type", None) == "text"),
             None,
         )
-        if text is None:
+        if not isinstance(text, str):
             raise ProviderError("no text block in the response")
         try:
             return json.loads(text)

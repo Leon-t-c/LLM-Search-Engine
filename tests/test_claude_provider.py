@@ -29,18 +29,24 @@ _DEFAULT_USAGE = SimpleNamespace(input_tokens=120, output_tokens=8)
 
 class StubMessages:
     def __init__(self, content=(), stop_reason="end_turn",
-                 stop_details=None, raises=None, usage=_DEFAULT_USAGE):
+                 stop_details=None, raises=None, usage=_DEFAULT_USAGE,
+                 response=None):
         self._content = list(content)
         self._stop_reason = stop_reason
         self._stop_details = stop_details
         self._raises = raises
         self._usage = usage
+        # A whole response object, for the cases where the point is which
+        # attributes are *missing* — which a keyword default cannot express.
+        self._response = response
         self.kwargs = None
 
     def create(self, **kwargs):
         self.kwargs = kwargs
         if self._raises is not None:
             raise self._raises
+        if self._response is not None:
+            return self._response
         return SimpleNamespace(
             content=self._content,
             stop_reason=self._stop_reason,
@@ -257,3 +263,51 @@ def test_a_truncated_response_names_the_cap_not_the_json():
     assert str(MAX_TOKENS) in message
     assert "max_tokens" in message
     assert "JSON" not in message
+
+
+def test_a_response_with_no_stop_reason_stays_inside_the_protocol():
+    """Nothing but ProviderError may leave this module.
+
+    An unguarded attribute read escapes past the HTTP layer, which catches
+    only ProviderError, and surfaces as an undifferentiated failure.
+    """
+    client, _, _ = _client(
+        response=SimpleNamespace(content=[_text({"root": "widget"})], usage=None)
+    )
+    with pytest.raises(ProviderError, match="stop_reason"):
+        ClaudeProvider("key", client=client).complete("sys", "q", SCHEMA, "R")
+
+
+def test_a_response_with_no_content_stays_inside_the_protocol():
+    client, _, _ = _client(
+        response=SimpleNamespace(stop_reason="end_turn", usage=None)
+    )
+    with pytest.raises(ProviderError, match="content"):
+        ClaudeProvider("key", client=client).complete("sys", "q", SCHEMA, "R")
+
+
+def test_content_that_is_not_a_list_stays_inside_the_protocol():
+    client, _, _ = _client(
+        response=SimpleNamespace(content=None, stop_reason="end_turn", usage=None)
+    )
+    with pytest.raises(ProviderError, match="content"):
+        ClaudeProvider("key", client=client).complete("sys", "q", SCHEMA, "R")
+
+
+def test_a_text_block_with_no_text_stays_inside_the_protocol():
+    client, _, _ = _client(content=[SimpleNamespace(type="text")])
+    with pytest.raises(ProviderError, match="no text block"):
+        ClaudeProvider("key", client=client).complete("sys", "q", SCHEMA, "R")
+
+
+def test_a_response_with_no_usage_attribute_at_all_does_not_fail_the_call():
+    """The usage read is on the success path; a gap there must not cost it."""
+    seen = []
+    client, _, _ = _client(
+        response=SimpleNamespace(
+            content=[_text({"root": "widget"})], stop_reason="end_turn"
+        )
+    )
+    provider = ClaudeProvider("key", client=client, on_usage=seen.append)
+    assert provider.complete("sys", "q", SCHEMA, "R") == {"root": "widget"}
+    assert seen == []
