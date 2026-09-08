@@ -233,3 +233,18 @@ def test_an_unknown_provider_is_rejected():
 
     with pytest.raises(ProviderError, match="unknown provider"):
         _build_provider(Settings(provider="gemini"))
+
+
+def test_both_providers_are_built_with_usage_accounting():
+    """The cost comparison is the point; neither side may account silently."""
+    from cert_nlq.api.app import _build_provider
+    from cert_nlq.config import Settings
+
+    claude = _build_provider(
+        Settings(provider="claude", anthropic_api_key="sk-not-real")
+    )
+    openai = _build_provider(
+        Settings(provider="openai", openai_api_key="sk-not-real", model="m")
+    )
+    assert claude._on_usage is not None
+    assert openai._on_usage is not None

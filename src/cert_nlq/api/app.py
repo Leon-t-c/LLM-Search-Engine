@@ -17,6 +17,12 @@ from ..translate.translator import translate
 
 logger = logging.getLogger(__name__)
 
+#: Every call leaves one `usage {...}` line carrying the stage, the model and
+#: the token counts. That log is the running cost record — the thing that is
+#: miserable to reconstruct after the fact. Both adapters feed it, and both
+#: emit the same keys, so one line prices either of them.
+usage_log = logging.getLogger("cert_nlq.usage")
+
 
 class TranslateRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
@@ -101,6 +107,10 @@ def create_app(registry_client, provider: Provider) -> FastAPI:
     return app
 
 
+def _log_usage(record: dict) -> None:
+    usage_log.info("usage %s", record)
+
+
 def _build_provider(settings) -> Provider:
     """Construct the configured provider.
 
@@ -111,19 +121,19 @@ def _build_provider(settings) -> Provider:
     if settings.provider == "claude":
         from ..translate.claude_provider import ClaudeProvider
 
-        return ClaudeProvider(settings.anthropic_api_key, settings.claude_model)
+        return ClaudeProvider(
+            settings.anthropic_api_key,
+            settings.claude_model,
+            on_usage=_log_usage,
+        )
     if settings.provider == "openai":
         from ..translate.openai_provider import OpenAIProvider
 
-        # Every call leaves one `usage {...}` line carrying the stage, the
-        # model and both token counts. That log is the running cost record —
-        # the thing that is miserable to reconstruct after the fact.
-        usage_log = logging.getLogger("cert_nlq.usage")
         return OpenAIProvider(
             settings.openai_api_key,
             settings.model,
             router_model=settings.router_model or None,
-            on_usage=lambda record: usage_log.info("usage %s", record),
+            on_usage=_log_usage,
         )
     raise ProviderError(f"unknown provider {settings.provider!r}")
 
