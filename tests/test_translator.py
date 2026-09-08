@@ -17,6 +17,29 @@ def test_the_prompt_offers_in_as_the_flat_alternative():
     assert "`in`" in TRANSLATOR_SYSTEM
 
 
+@pytest.mark.parametrize(
+    "slot", ["columns", "join", "aggregate", "group_by", "having", "sort"]
+)
+def test_the_prompt_names_every_slot_the_payload_offers(slot):
+    """A slot the prompt never mentions is a retry the golden set pays for.
+
+    The schema offers all of these; a prompt describing only conditions
+    scores the resulting miss as a model failure.
+    """
+    assert f"`{slot}`" in TRANSLATOR_SYSTEM
+
+
+def test_the_prompt_sends_counting_to_the_aggregate_slot():
+    """The validator carries aggregation, so counting must not be a filter."""
+    assert "count" in TRANSLATOR_SYSTEM
+    assert "the caller counts the rows" not in TRANSLATOR_SYSTEM
+
+
+def test_the_prompt_states_the_rule_the_validator_enforces():
+    """An empty payload is rejected downstream; say so before it is built."""
+    assert "at least one condition" in TRANSLATOR_SYSTEM
+
+
 def test_a_clean_question_produces_ok(registry):
     provider = FakeProvider([
         ROUTE,

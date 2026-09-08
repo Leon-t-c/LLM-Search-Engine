@@ -31,7 +31,13 @@ TRANSLATOR_SYSTEM = (
     "For a value from a coded field, write the meaning in plain words; a later "
     "step maps it to the stored code. Do not guess a code.\n"
     "Leave a name or address exactly as written, placeholders included.\n"
-    "Counting questions are ordinary filters: the caller counts the rows."
+    "Counting, totalling and averaging belong in `aggregate`, never in a "
+    "filter: how many is `aggregate: [{fn: count, field: *, as: total}]`.\n"
+    "The remaining slots: `columns` names the fields to return, `group_by` "
+    "breaks an aggregate down per category, `having` filters on an aggregate "
+    "by its `as` name, `sort` orders by one field or one aggregate, and "
+    "`join` names a related table the fields you used come from.\n"
+    "Every payload needs at least one condition or one aggregate."
 )
 
 #: One retry with the validation error appended, then refuse.
