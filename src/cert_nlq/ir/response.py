@@ -51,9 +51,17 @@ class Unresolved(BaseModel):
 
 
 class Flag(BaseModel):
+    """A shaky condition worth surfacing, named by the field it applies to.
+
+    Named by field rather than by position: conditions have not been a flat
+    list since the `where` tree landed, so an index cannot identify a node
+    in a tree. A field key is tree-agnostic and is what a caller would
+    actually highlight.
+    """
+
     model_config = ConfigDict(frozen=True)
 
-    condition_index: int
+    field: str
     phrase: str
     confidence: float = Field(ge=0.0, le=1.0)
 

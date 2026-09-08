@@ -19,7 +19,7 @@ def test_ok_carries_flags_for_shaky_conditions():
     ok = Ok(
         payload=PAYLOAD,
         registry_version="v",
-        flags=[Flag(condition_index=0, phrase="problem widgets", confidence=0.4)],
+        flags=[Flag(field="widget.status", phrase="problem widgets", confidence=0.4)],
     )
     assert ok.flags[0].phrase == "problem widgets"
 
@@ -28,7 +28,7 @@ def test_ok_carries_flags_for_shaky_conditions():
 def test_confidence_outside_zero_to_one_is_rejected(bad):
     """Both bounds — an earlier draft exercised only the upper one."""
     with pytest.raises(ValidationError):
-        Flag(condition_index=0, phrase="x", confidence=bad)
+        Flag(field="widget.status", phrase="x", confidence=bad)
 
 
 def test_needs_clarification_requires_candidates():
