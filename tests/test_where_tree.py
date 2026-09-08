@@ -165,12 +165,12 @@ def test_in_values_resolve_elementwise(registry):
 
 
 def test_an_unresolvable_element_is_reported_not_dropped(registry):
-    from cert_nlq.translate.values import resolve_values
+    from cert_nlq.translate.values import Unresolvable, resolve_values
 
     p = Payload.model_validate({"root": "widget", "where": {"combinator": "AND", "children": [
         {"field": "widget.status", "op": "in", "value": ["retired", "banana"]}]}})
     out, unresolved = resolve_values(p, registry.root("widget"), now_year=2026)
-    assert unresolved == ["widget.status=banana"]
+    assert unresolved == [Unresolvable(field="widget.status", op="in", value="banana")]
     assert list(iter_conditions(out.where))[0].value == ("retired", "banana")
 
 

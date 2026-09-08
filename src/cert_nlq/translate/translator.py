@@ -18,7 +18,7 @@ from ..registry.models import Registry, RootSpec
 from .provider import Provider
 from .refusals import RefusalReason
 from .router import Route, RoutingError, route
-from .values import resolve_values
+from .values import Unresolvable, resolve_values
 
 TRANSLATOR_SYSTEM = (
     "Translate the question into the given JSON payload shape.\n"
@@ -122,14 +122,17 @@ def _as_group(node) -> Group:
 
 
 def _clarify(
-    payload: Payload, root: RootSpec, unresolved: str, version: str
+    payload: Payload, root: RootSpec, unresolved: Unresolvable, version: str
 ) -> TranslateResponse:
     """Drop the unresolved condition and offer the field's own codes.
 
     Candidates carry the registry's field label with the raw stored value —
-    `Status = X`, never a paraphrase. Users read these codes fluently.
+    `Status = X`, never a paraphrase. Users read these codes fluently. Each
+    candidate is offered under `unresolved.op`, the operator the phrase was
+    actually asked under — for a list (`in`) operator that means each
+    candidate offers one legal element, not a whole list.
     """
-    key, _, phrase = unresolved.partition("=")
+    key, phrase = unresolved.field, str(unresolved.value)
     spec = root.fields_by_key.get(key)
     kept = _without_field(payload.where, key)
     vocabulary = spec.vocabulary if spec is not None else ()
@@ -141,7 +144,7 @@ def _clarify(
     candidates = tuple(
         Candidate(
             field=key,
-            op="=",
+            op=unresolved.op,
             value=entry.code,
             label=spec.label,
             confidence=round(1.0 / len(vocabulary), 2),

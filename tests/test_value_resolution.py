@@ -3,6 +3,7 @@ import pytest
 from cert_nlq.ir.payload import Payload
 from cert_nlq.registry.models import VocabEntry
 from cert_nlq.translate.values import (
+    Unresolvable,
     resolve_money,
     resolve_relative_year,
     resolve_values,
@@ -97,7 +98,7 @@ def test_an_unmatched_vocabulary_value_is_reported_not_guessed(registry):
          "children": [{"field": "widget.status", "op": "=", "value": "banana"}]}}
     )
     resolved, unresolved = resolve_values(payload, registry.root("widget"), now_year=2026)
-    assert unresolved == ["widget.status=banana"]
+    assert unresolved == [Unresolvable(field="widget.status", op="=", value="banana")]
     assert resolved.where.children[0].value == "banana"
 
 
@@ -148,7 +149,7 @@ def test_a_non_finite_money_value_is_reported_unresolved(registry):
          "children": [{"field": "widget.price", "op": ">", "value": "1e400"}]}}
     )
     resolved, unresolved = resolve_values(payload, registry.root("widget"), now_year=2026)
-    assert unresolved == ["widget.price=1e400"]
+    assert unresolved == [Unresolvable(field="widget.price", op=">", value="1e400")]
     assert resolved.where.children[0].value == "1e400", "left as written, not coerced"
 
 

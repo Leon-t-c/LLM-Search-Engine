@@ -10,7 +10,9 @@ resolve — this service has no data access.
 import math
 import re
 
-from ..ir.payload import NO_VALUE_OPS, Group, Payload
+from pydantic import BaseModel, ConfigDict
+
+from ..ir.payload import NO_VALUE_OPS, Group, JsonScalar, Payload
 from ..registry.models import FieldSpec, RootSpec
 
 #: Entity placeholders the host substituted before the question was sent.
@@ -23,6 +25,21 @@ _RELATIVE_YEARS = {
 }
 _MONEY_STRIP = re.compile(r"[$,\s]")
 _YEAR_LITERAL = re.compile(r"(19|20)\d{2}")
+
+
+class Unresolvable(BaseModel):
+    """One value that did not resolve, with the operator it appeared under.
+
+    The operator travels with the value because a candidate offered back
+    under the wrong one inverts the question: a phrase that failed under
+    `!=` must not come back as an `=` suggestion.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    field: str
+    op: str
+    value: JsonScalar
 
 
 def resolve_vocabulary(spec: FieldSpec, raw) -> str | None:
@@ -104,7 +121,7 @@ def _resolve_one(spec: FieldSpec, raw, now_year: int):
     return raw, True
 
 
-def _resolve_node(node, by_key: dict, now_year: int, unresolved: list[str]):
+def _resolve_node(node, by_key: dict, now_year: int, unresolved: list[Unresolvable]):
     """Resolve one leaf, or recurse into a group's children.
 
     A list value (`in`) is resolved element by element: each unresolved
@@ -121,7 +138,8 @@ def _resolve_node(node, by_key: dict, now_year: int, unresolved: list[str]):
     if isinstance(node.value, tuple):
         parts = [_resolve_one(spec, v, now_year) for v in node.value]
         unresolved.extend(
-            f"{node.field}={raw}" for raw, (_, ok) in zip(node.value, parts) if not ok
+            Unresolvable(field=node.field, op="in", value=raw)
+            for raw, (_, ok) in zip(node.value, parts) if not ok
         )
         if all(ok for _, ok in parts):
             return node.model_copy(update={"value": tuple(v for v, _ in parts)})
@@ -129,22 +147,22 @@ def _resolve_node(node, by_key: dict, now_year: int, unresolved: list[str]):
     value, ok = _resolve_one(spec, node.value, now_year)
     value2, ok2 = _resolve_one(spec, node.value2, now_year)
     if not ok:
-        unresolved.append(f"{node.field}={node.value}")
+        unresolved.append(Unresolvable(field=node.field, op=node.op, value=node.value))
     if not ok2:
-        unresolved.append(f"{node.field}={node.value2}")
+        unresolved.append(Unresolvable(field=node.field, op=node.op, value=node.value2))
     return node.model_copy(update={"value": value, "value2": value2})
 
 
 def resolve_values(
     payload: Payload, root: RootSpec, now_year: int
-) -> tuple[Payload, list[str]]:
+) -> tuple[Payload, list[Unresolvable]]:
     """Rewrite resolvable values in place; report the ones that did not resolve.
 
     An unresolved value is returned as written rather than guessed, so the
     caller can flag the condition or ask (the confidence ladder).
     """
     by_key = root.fields_by_key
-    unresolved: list[str] = []
+    unresolved: list[Unresolvable] = []
     where = (
         _resolve_node(payload.where, by_key, now_year, unresolved)
         if payload.where is not None

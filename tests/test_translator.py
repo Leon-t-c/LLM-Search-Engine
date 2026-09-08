@@ -108,6 +108,26 @@ def test_relative_year_resolves_against_the_supplied_year(registry):
     assert next(iter_conditions(response.payload.where)).value == 2025
 
 
+def test_a_candidate_keeps_the_operator_it_was_asked_under(registry):
+    """An `!=` question must not come back as an `=` suggestion.
+
+    Offering the inverse of what was asked is worse than offering nothing:
+    it reads as a helpful correction and means the opposite.
+    """
+    provider = FakeProvider([
+        ROUTE,
+        {"root": "widget", "where": {"combinator": "AND",
+          "children": [{"field": "widget.region", "op": "=", "value": "N"},
+                        {"field": "widget.status", "op": "!=", "value": "problematic"}]}},
+    ])
+    response = translate(
+        "widgets up north that are not problematic", registry, provider, now_year=2026
+    )
+    assert response.status == "needs_clarification"
+    assert response.unresolved.candidates
+    assert all(c.op == "!=" for c in response.unresolved.candidates)
+
+
 def test_an_unresolvable_sole_condition_refuses_rather_than_clarifies(registry):
     """With nothing left to populate the builder, a clarification is empty."""
     provider = FakeProvider([
