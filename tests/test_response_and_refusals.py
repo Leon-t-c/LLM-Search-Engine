@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from cert_nlq.ir.response import Candidate, Flag, NeedsClarification, Ok, Refused
+from cert_nlq.ir.response import Flag, NeedsClarification, Ok, Refused
 from cert_nlq.translate.refusals import RefusalReason
 
 PAYLOAD = {"root": "widget", "where": {"combinator": "AND",
@@ -29,9 +29,6 @@ def test_confidence_outside_zero_to_one_is_rejected(bad):
     """Both bounds — an earlier draft exercised only the upper one."""
     with pytest.raises(ValidationError):
         Flag(condition_index=0, phrase="x", confidence=bad)
-    with pytest.raises(ValidationError):
-        Candidate(field="widget.status", op="=", value="A",
-                  label="Status", confidence=bad)
 
 
 def test_needs_clarification_requires_candidates():
@@ -53,7 +50,7 @@ def test_needs_clarification_with_candidates_validates():
                     "question": "What counts as a problem widget?",
                     "candidates": [
                         {"field": "widget.status", "op": "=", "value": "X",
-                         "label": "Status", "confidence": 0.45}]},
+                         "label": "Status"}]},
         registry_version="v",
     )
     assert response.status == "needs_clarification"

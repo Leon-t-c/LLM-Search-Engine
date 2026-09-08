@@ -18,13 +18,19 @@ from .payload import Payload
 
 
 class Candidate(BaseModel):
+    """One legal value for a field, offered unranked.
+
+    Candidates are the field's complete stored vocabulary — nothing here
+    scores which one the phrase actually resembles, so there is no ordering
+    to read into the sequence.
+    """
+
     model_config = ConfigDict(frozen=True)
 
     field: str
     op: str
     value: str | int | float | bool | None = None
     label: str
-    confidence: float = Field(ge=0.0, le=1.0)
 
 
 class Unresolved(BaseModel):

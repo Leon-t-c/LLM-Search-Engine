@@ -147,7 +147,6 @@ def _clarify(
             op=unresolved.op,
             value=entry.code,
             label=spec.label,
-            confidence=round(1.0 / len(vocabulary), 2),
         )
         for entry in vocabulary
     )
