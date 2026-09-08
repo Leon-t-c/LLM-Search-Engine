@@ -90,6 +90,13 @@ def test_a_missing_question_is_a_422(registry):
     assert response.status_code == 422
 
 
+def test_an_out_of_range_now_year_is_a_422(registry):
+    response = _client(registry, []).post(
+        "/translate", json={"question": "active widgets", "now_year": 99999}
+    )
+    assert response.status_code == 422
+
+
 def test_registry_unavailable_is_a_503(registry):
     response = _client(
         registry, [], error=RegistryUnavailable("registry returned 503")
