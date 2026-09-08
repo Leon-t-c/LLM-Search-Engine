@@ -10,6 +10,7 @@ dependencies = [
     "pydantic-settings>=2.4",
     "httpx>=0.27",
     "openai>=1.50",
+    "anthropic>=0.40",
 ]
 
 [project.optional-dependencies]

@@ -201,6 +201,10 @@ def test_make_app_builds_without_calling_the_api(monkeypatch):
     from cert_nlq.api.app import make_app
     from cert_nlq.config import get_settings
 
+    # Pinned rather than left to the default: the factory now selects a
+    # provider from this setting, so an inherited value would decide which
+    # adapter this test builds.
+    monkeypatch.setenv("CERT_NLQ_PROVIDER", "openai")
     monkeypatch.setenv("CERT_NLQ_REGISTRY_URL", "https://cert.example")
     monkeypatch.setenv("CERT_NLQ_REGISTRY_TOKEN", "t")
     monkeypatch.setenv("CERT_NLQ_OPENAI_API_KEY", "sk-not-a-real-key")
@@ -210,3 +214,22 @@ def test_make_app_builds_without_calling_the_api(monkeypatch):
         assert make_app().title == "cert-nlq"
     finally:
         get_settings.cache_clear()
+
+
+def test_provider_selection_honours_the_setting():
+    from cert_nlq.api.app import _build_provider
+    from cert_nlq.config import Settings
+    from cert_nlq.translate.claude_provider import ClaudeProvider
+
+    provider = _build_provider(
+        Settings(provider="claude", anthropic_api_key="sk-not-real")
+    )
+    assert isinstance(provider, ClaudeProvider)
+
+
+def test_an_unknown_provider_is_rejected():
+    from cert_nlq.api.app import _build_provider
+    from cert_nlq.config import Settings
+
+    with pytest.raises(ProviderError, match="unknown provider"):
+        _build_provider(Settings(provider="gemini"))

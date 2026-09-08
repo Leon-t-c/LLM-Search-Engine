@@ -101,6 +101,33 @@ def create_app(registry_client, provider: Provider) -> FastAPI:
     return app
 
 
+def _build_provider(settings) -> Provider:
+    """Construct the configured provider.
+
+    Imports sit inside each branch so that an adapter that is broken, or whose
+    SDK is not installed, cannot break the other one — and so neither SDK is
+    imported unless it is actually in use.
+    """
+    if settings.provider == "claude":
+        from ..translate.claude_provider import ClaudeProvider
+
+        return ClaudeProvider(settings.anthropic_api_key, settings.claude_model)
+    if settings.provider == "openai":
+        from ..translate.openai_provider import OpenAIProvider
+
+        # Every call leaves one `usage {...}` line carrying the stage, the
+        # model and both token counts. That log is the running cost record —
+        # the thing that is miserable to reconstruct after the fact.
+        usage_log = logging.getLogger("cert_nlq.usage")
+        return OpenAIProvider(
+            settings.openai_api_key,
+            settings.model,
+            router_model=settings.router_model or None,
+            on_usage=lambda record: usage_log.info("usage %s", record),
+        )
+    raise ProviderError(f"unknown provider {settings.provider!r}")
+
+
 def make_app() -> FastAPI:
     """The production app, built from settings.
 
@@ -112,24 +139,9 @@ def make_app() -> FastAPI:
     money. Run it with uvicorn's factory flag:
 
         uvicorn cert_nlq.api.app:make_app --factory
-
-    The provider import is inside the function so that importing this module
-    never pulls in a vendor SDK, and never constructs a client.
     """
     settings = get_settings()
-    from ..translate.openai_provider import OpenAIProvider
-
-    # Every call leaves one `usage {...}` line carrying the stage, the model
-    # and both token counts. That log is the running cost record — the thing
-    # that is miserable to reconstruct after the fact.
-    usage_log = logging.getLogger("cert_nlq.usage")
-
     return create_app(
         RegistryClient(settings.registry_url, settings.registry_token),
-        OpenAIProvider(
-            settings.openai_api_key,
-            settings.model,
-            router_model=settings.router_model or None,
-            on_usage=lambda record: usage_log.info("usage %s", record),
-        ),
+        _build_provider(settings),
     )
