@@ -175,7 +175,10 @@ def test_no_database_driver_is_importable():
     SQLAlchemy is deliberately absent: the phase-2 eval store uses it, and it
     grants no database access on its own.
     """
-    for module in ("psycopg", "psycopg2", "asyncpg", "pyodbc", "pymssql", "MySQLdb"):
+    for module in (
+        "psycopg", "psycopg2", "asyncpg", "pyodbc", "pymssql", "MySQLdb",
+        "pymysql", "mysql.connector", "pg8000",
+    ):
         with pytest.raises(ImportError):
             __import__(module)
 
