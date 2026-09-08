@@ -26,11 +26,16 @@ class RegistryClient:
         self.cached: Registry | None = None
 
     def fetch(self, force: bool = False) -> Registry:
-        """Return the cached registry, fetching it if absent or forced.
+        """Return the cached registry, fetching it when absent or forced.
 
-        A failed forced refetch raises and leaves the previous cache in place,
-        so registry skew degrades to a stale vocabulary rather than an outage.
-        The host re-validates every payload regardless.
+        Nothing in this service passes `force`: the first successful fetch
+        pins the registry for the life of the process, so `registry_version`
+        is a constant on every response it serves. The parameter is here for
+        a refresh caller that does not exist yet — a TTL, or an operator
+        endpoint — and its behaviour is chosen for that caller: a failed
+        forced refetch raises and leaves the previous cache in place, so
+        registry skew would degrade to a stale vocabulary rather than an
+        outage. The host re-validates every payload regardless.
         """
         if self.cached is not None and not force:
             return self.cached

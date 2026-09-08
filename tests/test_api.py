@@ -15,14 +15,18 @@ class StubRegistry:
 
     def __init__(self, registry, error=None, loaded=True):
         self._registry = registry
-        self._error = error
+        self.error = error
+        self.fetches = 0
         #: `loaded=False` represents a RegistryClient that has never
         #: completed a successful fetch, where `cached` stays `None`.
         self.cached = registry if loaded else None
 
     def fetch(self, force: bool = False):
-        if self._error is not None:
-            raise self._error
+        self.fetches += 1
+        if self.error is not None:
+            raise self.error
+        # Mirrors RegistryClient: a successful fetch populates the cache.
+        self.cached = self._registry
         return self._registry
 
 
@@ -165,18 +169,43 @@ def test_healthz_reports_the_cached_registry_version(registry):
     assert response.json() == {"status": "ok", "registry_version": "sha256:fixture-v1"}
 
 
-def test_healthz_is_degraded_before_the_registry_has_ever_loaded(registry):
+def test_healthz_is_degraded_while_the_registry_is_out_of_reach(registry):
     """An instance that has never loaded the registry is not ready.
 
     Reporting ok here sends live traffic to a process where every call is
     already known to fail.
     """
-    client = TestClient(
-        create_app(StubRegistry(registry, loaded=False), FakeProvider([]))
-    )
+    stub = StubRegistry(registry, error=RegistryUnavailable("down"), loaded=False)
+    client = TestClient(create_app(stub, FakeProvider([])))
     response = client.get("/healthz")
     assert response.status_code == 503
     assert response.json() == {"status": "degraded", "registry_version": None}
+
+
+def test_healthz_becomes_ready_on_its_own_once_the_registry_answers(registry):
+    """A cold process must be able to reach ready without serving a call.
+
+    Readiness gates traffic, and the only other caller of `fetch` sits behind
+    that gate — so a probe that merely reports the cache would keep a healthy
+    process out of rotation forever.
+    """
+    stub = StubRegistry(registry, error=RegistryUnavailable("down"), loaded=False)
+    client = TestClient(create_app(stub, FakeProvider([])))
+    assert client.get("/healthz").status_code == 503
+
+    stub.error = None
+    response = client.get("/healthz")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok", "registry_version": "sha256:fixture-v1"}
+
+
+def test_healthz_does_not_refetch_once_the_registry_is_cached(registry):
+    """The probe is called on a schedule; a warm process must stay free."""
+    stub = StubRegistry(registry)
+    client = TestClient(create_app(stub, FakeProvider([])))
+    assert client.get("/healthz").status_code == 200
+    assert client.get("/healthz").status_code == 200
+    assert stub.fetches == 0
 
 
 def test_no_database_driver_is_importable():

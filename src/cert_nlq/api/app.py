@@ -80,7 +80,23 @@ def create_app(
     def healthz():
         cached = getattr(registry_client, "cached", None)
         if cached is None:
-            # `cached` is None until the first successful registry fetch.
+            # `cached` is None until the first successful registry fetch, and
+            # the only other caller of `fetch` sits behind this very gate — so
+            # a probe that merely reported the cache would leave a cold process
+            # unready forever: a load balancer honouring it would never send
+            # the request that would warm it. Warming it here instead of in a
+            # startup hook keeps a registry outage from stopping the process
+            # booting at all, which is worse: a process that boots unready
+            # recovers on its own.
+            try:
+                cached = registry_client.fetch()
+            except RegistryUnavailable:
+                # Not a blanket `except`: the client folds every reachability
+                # and parse failure into this one type, and a real bug here
+                # should still surface rather than read as a clean 503.
+                logger.warning("registry still unreachable; reporting unready")
+                cached = None
+        if cached is None:
             # An instance that has never reached the registry is not ready:
             # every call it serves is already guaranteed to fail, so the
             # status line itself must say so, not just the body — otherwise
