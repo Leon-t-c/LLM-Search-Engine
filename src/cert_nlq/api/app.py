@@ -6,6 +6,7 @@ tests construct an app that cannot reach the network.
 import logging
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 from ..config import get_settings
@@ -34,12 +35,19 @@ def create_app(registry_client, provider: Provider) -> FastAPI:
     app = FastAPI(title="cert-nlq", version="0.1.0")
 
     @app.get("/healthz")
-    def healthz() -> dict:
+    def healthz():
         cached = getattr(registry_client, "cached", None)
-        return {
-            "status": "ok",
-            "registry_version": cached.version if cached is not None else None,
-        }
+        if cached is None:
+            # `cached` is None until the first successful registry fetch.
+            # An instance that has never reached the registry is not ready:
+            # every call it serves is already guaranteed to fail, so the
+            # status line itself must say so, not just the body — otherwise
+            # a load balancer reads 200 and keeps routing live traffic here.
+            return JSONResponse(
+                status_code=503,
+                content={"status": "degraded", "registry_version": None},
+            )
+        return {"status": "ok", "registry_version": cached.version}
 
     @app.post("/translate")
     def translate_endpoint(request: TranslateRequest) -> dict:

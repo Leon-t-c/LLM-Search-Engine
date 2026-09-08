@@ -13,10 +13,12 @@ GOOD = {"root": "widget", "where": {"combinator": "AND", "children": [
 class StubRegistry:
     """Stands in for RegistryClient. Same two members the app touches."""
 
-    def __init__(self, registry, error=None):
+    def __init__(self, registry, error=None, loaded=True):
         self._registry = registry
         self._error = error
-        self.cached = registry
+        #: `loaded=False` represents a RegistryClient that has never
+        #: completed a successful fetch, where `cached` stays `None`.
+        self.cached = registry if loaded else None
 
     def fetch(self, force: bool = False):
         if self._error is not None:
@@ -140,6 +142,20 @@ def test_healthz_reports_the_cached_registry_version(registry):
     response = _client(registry, []).get("/healthz")
     assert response.status_code == 200
     assert response.json() == {"status": "ok", "registry_version": "sha256:fixture-v1"}
+
+
+def test_healthz_is_degraded_before_the_registry_has_ever_loaded(registry):
+    """An instance that has never loaded the registry is not ready.
+
+    Reporting ok here sends live traffic to a process where every call is
+    already known to fail.
+    """
+    client = TestClient(
+        create_app(StubRegistry(registry, loaded=False), FakeProvider([]))
+    )
+    response = client.get("/healthz")
+    assert response.status_code == 503
+    assert response.json() == {"status": "degraded", "registry_version": None}
 
 
 def test_no_database_driver_is_importable():
