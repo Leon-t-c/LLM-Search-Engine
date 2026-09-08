@@ -196,6 +196,42 @@ def dedupe_enums(schema: dict) -> dict:
     return result
 
 
+def strictify(node):
+    """Rewrite a generated schema into the subset the providers accept.
+
+    Both vendors converge on the same demands: every object closed, every
+    property required, and no keyword the validator does not understand.
+    Optional fields survive as an explicit null in the type union, which is
+    the documented way to say "may be absent" in a closed schema — the model
+    then has to state the absence rather than omit the key.
+
+    Done here rather than in each adapter so the two cannot drift, and so the
+    shape can be asserted offline. Nothing else consumes this output:
+    payload validation runs off the models, not the schema.
+    """
+    if isinstance(node, list):
+        return [strictify(child) for child in node]
+    if not isinstance(node, dict):
+        return node
+
+    # `default` goes because a closed schema states every key, so a default
+    # can never apply; `title` goes because it is decoration the model never
+    # reads and pays for on every call — a small slice carries dozens. A bare
+    # `$ref` stays bare: nothing below adds a key to a node that declares
+    # neither `type: object` nor `properties`.
+    rewritten = {
+        key: strictify(value)
+        for key, value in node.items()
+        if key not in ("default", "title")
+    }
+    properties = rewritten.get("properties")
+    if rewritten.get("type") != "object" and not isinstance(properties, dict):
+        return rewritten
+    rewritten["additionalProperties"] = False
+    rewritten["required"] = list(properties or {})
+    return rewritten
+
+
 def json_schema_for(
     root: RootSpec,
     groups: Sequence[str] = (),
@@ -205,6 +241,8 @@ def json_schema_for(
 
     Enum lists are deduplicated: the same field-key list otherwise ships
     several times in every call, and the schema is the bulk of the prompt.
+    The result is then narrowed to the subset the providers accept — see
+    `strictify` — so no adapter has to remember to do it.
     """
     model = build_payload_model(root, groups, joins)
-    return dedupe_enums(model.model_json_schema(by_alias=True))
+    return strictify(dedupe_enums(model.model_json_schema(by_alias=True)))

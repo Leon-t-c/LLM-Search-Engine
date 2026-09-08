@@ -255,3 +255,76 @@ def test_a_hoisted_ref_carries_no_sibling_keys(registry):
     assert refs, "expected at least one hoisted enum"
     offenders = [r for r in refs if set(r) != {"$ref"}]
     assert offenders == [], f"$ref with siblings: {offenders}"
+
+
+def _walk(node):
+    """Every dict in the schema, including the root."""
+    if isinstance(node, dict):
+        yield node
+        for value in node.values():
+            yield from _walk(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _walk(value)
+
+
+def _is_object(node):
+    return node.get("type") == "object" or isinstance(node.get("properties"), dict)
+
+
+def test_the_generated_schema_meets_the_strict_subset(registry):
+    """Both providers reject a schema that leaves an object open.
+
+    No stub can catch this: a fake client accepts any dict, so the failure
+    only ever appears against the live API, after the routing call has
+    already been paid for.
+    """
+    schema = json_schema_for(registry.root("widget"))
+    nodes = list(_walk(schema))
+
+    open_objects = [n for n in nodes if _is_object(n) and n.get("additionalProperties") is not False]
+    assert open_objects == [], f"objects left open: {len(open_objects)}"
+
+    for node in nodes:
+        if not _is_object(node):
+            continue
+        properties = list(node.get("properties") or ())
+        assert list(node.get("required") or ()) == properties, (
+            f"required does not cover properties: {node.get('required')} "
+            f"vs {properties}"
+        )
+
+    assert [n for n in nodes if "default" in n] == []
+    assert [n for n in nodes if "title" in n] == []
+
+
+def test_closing_the_schema_does_not_change_what_is_accepted(registry):
+    """Validation runs off the models, so the wire shape must not matter.
+
+    Every key stated, absences stated explicitly — the only payload shape the
+    closed schema now permits — still validates.
+    """
+    from cert_nlq.ir.validate import validate_payload
+
+    payload = validate_payload(
+        {
+            "root": "widget",
+            "where": None,
+            "columns": [],
+            "join": [],
+            "aggregate": [{"fn": "count", "field": "*", "as": "n"}],
+            "group_by": [],
+            "having": [],
+            "sort": None,
+        },
+        registry,
+    )
+    assert payload.columns == ()
+    assert payload.where is None
+
+
+def test_the_strict_pass_leaves_every_hoisted_ref_bare(registry):
+    """Closing the objects must not add a sibling beside a `$ref`."""
+    schema = json_schema_for(registry.root("widget"))
+    offenders = [n for n in _walk(schema) if "$ref" in n and set(n) != {"$ref"}]
+    assert offenders == []
