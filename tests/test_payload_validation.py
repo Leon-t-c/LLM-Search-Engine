@@ -181,7 +181,7 @@ def test_iequals_is_rejected_where_the_registry_does_not_offer_it(registry):
 
 
 def test_a_payload_with_no_conditions_and_no_aggregate_is_rejected(registry):
-    """An unfiltered scan of a ten-million-row table is never the intent."""
+    """An unfiltered scan of a whole table is never the intent."""
     with pytest.raises(PayloadError, match="at least one condition"):
         validate_payload(_ok(conditions=[]), registry)
 

@@ -71,8 +71,8 @@ def resolve_vocabulary(spec: FieldSpec, raw) -> str | None:
 def resolve_relative_year(raw, now_year: int) -> int | None:
     """Resolve a year phrase from the calendar, never from MAX(year).
 
-    Eleven rows in the production data carry impossible years (up to 6465), so
-    anything derived from the data's maximum is poisoned.
+    The stored year column is known to hold impossible values, so anything
+    derived from the data's maximum is poisoned.
     """
     text = str(raw).strip().casefold()
     if text in _RELATIVE_YEARS:

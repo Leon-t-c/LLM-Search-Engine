@@ -5,8 +5,8 @@ similarity — no embeddings, no vector index, no top-k threshold to tune. It is
 also separately measurable: a stage-1 miss is diagnosable on its own, which a
 single blended call would hide.
 
-Groups matter as much as roots here. One root can carry several hundred fields,
-so routing to a root alone barely narrows anything.
+Groups matter as much as roots here. A root carries far more fields than one
+call should paste, so routing to a root alone barely narrows anything.
 
 The group names come from the host app's tab layout, so they are section
 abbreviations rather than descriptions. Routing on the name alone would be
@@ -18,8 +18,9 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from ..registry.models import Registry, RootSpec
 from .provider import Provider
 
-#: Field labels shown per group in the routing prompt. A group can hold dozens
-#: of fields; pasting all of them into every call is not worth the tokens.
+#: Field labels shown per group in the routing prompt. A group can hold many
+#: more fields than this; pasting all of them into every call is not worth
+#: the tokens.
 MAX_SAMPLE_LABELS = 8
 
 #: Names the stage-1 schema. Providers may key cost decisions off it — a
