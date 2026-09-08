@@ -4,15 +4,19 @@ from cert_nlq.ir.validate import PayloadError, validate_payload
 
 
 def _ok(**overrides):
-    payload = {"root": "widget", "combinator": "AND",
-               "conditions": [{"field": "widget.status", "op": "=", "value": "A"}]}
+    conditions = overrides.pop(
+        "conditions", [{"field": "widget.status", "op": "=", "value": "A"}]
+    )
+    payload = {"root": "widget"}
+    if conditions:
+        payload["where"] = {"combinator": "AND", "children": conditions}
     payload.update(overrides)
     return payload
 
 
 def test_a_good_payload_validates(registry):
     result = validate_payload(_ok(), registry)
-    assert result.conditions[0].field == "widget.status"
+    assert result.where.children[0].field == "widget.status"
 
 
 def test_unknown_root_is_rejected(registry):
@@ -165,7 +169,7 @@ def test_iequals_is_accepted_where_the_registry_offers_it(registry):
         _ok(conditions=[{"field": "widget.region", "op": "iequals", "value": "N"}]),
         registry,
     )
-    assert result.conditions[0].op == "iequals"
+    assert result.where.children[0].op == "iequals"
 
 
 def test_iequals_is_rejected_where_the_registry_does_not_offer_it(registry):

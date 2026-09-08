@@ -63,18 +63,18 @@ def test_a_join_no_selected_group_covers_falls_back_to_all_its_fields(registry):
 def test_generated_model_accepts_an_in_scope_field(registry):
     model = build_payload_model(registry.root("widget"), groups=("Lifecycle",))
     parsed = model.model_validate(
-        {"root": "widget", "combinator": "AND",
-         "conditions": [{"field": "widget.status", "op": "=", "value": "A"}]}
+        {"root": "widget", "where": {"combinator": "AND",
+         "children": [{"field": "widget.status", "op": "=", "value": "A"}]}}
     )
-    assert parsed.conditions[0].field == "widget.status"
+    assert parsed.where.children[0].field == "widget.status"
 
 
 def test_generated_model_rejects_an_out_of_scope_field(registry):
     model = build_payload_model(registry.root("widget"), groups=("Lifecycle",))
     with pytest.raises(ValidationError):
         model.model_validate(
-            {"root": "widget", "combinator": "AND",
-             "conditions": [{"field": "widget.price", "op": ">", "value": 1}]}
+            {"root": "widget", "where": {"combinator": "AND",
+             "children": [{"field": "widget.price", "op": ">", "value": 1}]}}
         )
 
 
@@ -82,33 +82,28 @@ def test_generated_model_rejects_a_fabricated_field(registry):
     model = build_payload_model(registry.root("widget"))
     with pytest.raises(ValidationError):
         model.model_validate(
-            {"root": "widget", "combinator": "AND",
-             "conditions": [{"field": "widget.invented", "op": "=", "value": "x"}]}
+            {"root": "widget", "where": {"combinator": "AND",
+             "children": [{"field": "widget.invented", "op": "=", "value": "x"}]}}
         )
 
 
 def test_generated_model_pins_root_to_a_single_value(registry):
     model = build_payload_model(registry.root("widget"))
     with pytest.raises(ValidationError):
-        model.model_validate({"root": "vendor", "combinator": "AND", "conditions": []})
+        model.model_validate({"root": "vendor"})
 
 
 def test_join_choices_come_from_the_registry(registry):
     model = build_payload_model(registry.root("widget"))
-    model.model_validate(
-        {"root": "widget", "combinator": "AND", "conditions": [], "join": ["shipment"]}
-    )
+    model.model_validate({"root": "widget", "join": ["shipment"]})
     with pytest.raises(ValidationError):
-        model.model_validate(
-            {"root": "widget", "combinator": "AND", "conditions": [],
-             "join": ["arbitrary_table"]}
-        )
+        model.model_validate({"root": "widget", "join": ["arbitrary_table"]})
 
 
 def test_count_star_is_an_allowed_aggregate_target(registry):
     model = build_payload_model(registry.root("widget"))
     parsed = model.model_validate(
-        {"root": "widget", "combinator": "AND", "conditions": [],
+        {"root": "widget",
          "aggregate": [{"fn": "count", "field": "*", "as": "n"}]}
     )
     assert parsed.aggregate[0].field == "*"
@@ -125,14 +120,12 @@ def test_a_root_with_no_joins_still_generates(registry):
     """Literal[()] is illegal, so an empty join list needs a sentinel."""
     model = build_payload_model(registry.root("vendor"))
     parsed = model.model_validate(
-        {"root": "vendor", "combinator": "AND",
-         "conditions": [{"field": "vendor.name", "op": "contains", "value": "x"}]}
+        {"root": "vendor", "where": {"combinator": "AND",
+         "children": [{"field": "vendor.name", "op": "contains", "value": "x"}]}}
     )
     assert parsed.join == ()
     with pytest.raises(ValidationError):
-        model.model_validate(
-            {"root": "vendor", "combinator": "AND", "conditions": [], "join": ["widget"]}
-        )
+        model.model_validate({"root": "vendor", "join": ["widget"]})
 
 
 def test_an_unknown_group_still_leaves_the_identity_group_in_scope(registry):
@@ -166,8 +159,8 @@ def test_deduplication_preserves_validation(registry):
     assert "$defs" in schema
     # the model itself is unchanged — only its serialised schema is rewritten
     model.model_validate(
-        {"root": "widget", "combinator": "AND",
-         "conditions": [{"field": "widget.price", "op": ">", "value": 1}],
+        {"root": "widget", "where": {"combinator": "AND",
+         "children": [{"field": "widget.price", "op": ">", "value": 1}]},
          "columns": ["widget.price"], "group_by": ["widget.region"]}
     )
 
@@ -183,13 +176,11 @@ def test_sort_field_is_vocabulary_closed(registry):
     """`sort.field`'s domain is the same as `columns`; it must be closed too."""
     model = build_payload_model(registry.root("widget"))
     model.model_validate(
-        {"root": "widget", "combinator": "AND", "conditions": [],
-         "sort": {"field": "widget.price", "dir": "desc"}}
+        {"root": "widget", "sort": {"field": "widget.price", "dir": "desc"}}
     )
     with pytest.raises(ValidationError):
         model.model_validate(
-            {"root": "widget", "combinator": "AND", "conditions": [],
-             "sort": {"field": "widget.invented", "dir": "desc"}}
+            {"root": "widget", "sort": {"field": "widget.invented", "dir": "desc"}}
         )
 
 
@@ -198,7 +189,7 @@ def test_sort_still_requires_exactly_one_target(registry):
     model = build_payload_model(registry.root("widget"))
     with pytest.raises(ValidationError):
         model.model_validate(
-            {"root": "widget", "combinator": "AND", "conditions": [],
+            {"root": "widget",
              "sort": {"field": "widget.price", "agg": "total", "dir": "asc"}}
         )
 
@@ -211,13 +202,13 @@ def test_having_op_is_closed_but_agg_is_not(registry):
     """
     model = build_payload_model(registry.root("widget"))
     model.model_validate(
-        {"root": "widget", "combinator": "AND", "conditions": [],
+        {"root": "widget",
          "aggregate": [{"fn": "count", "field": "*", "as": "n"}],
          "having": [{"agg": "n", "op": ">", "value": 1}]}
     )
     with pytest.raises(ValidationError):
         model.model_validate(
-            {"root": "widget", "combinator": "AND", "conditions": [],
+            {"root": "widget",
              "having": [{"agg": "n", "op": "not_an_operator", "value": 1}]}
         )
 
@@ -227,8 +218,8 @@ def test_an_operator_outside_the_slice_is_rejected(registry):
     model = build_payload_model(registry.root("widget"))
     with pytest.raises(ValidationError):
         model.model_validate(
-            {"root": "widget", "combinator": "AND",
-             "conditions": [{"field": "widget.status", "op": "made_up", "value": "A"}]}
+            {"root": "widget", "where": {"combinator": "AND",
+             "children": [{"field": "widget.status", "op": "made_up", "value": "A"}]}}
         )
 
 

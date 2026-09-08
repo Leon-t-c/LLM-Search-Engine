@@ -52,72 +52,73 @@ def test_money_strips_currency_formatting():
 
 def test_resolve_values_rewrites_a_vocabulary_condition(registry):
     payload = Payload.model_validate(
-        {"root": "widget", "combinator": "AND",
-         "conditions": [{"field": "widget.status", "op": "=", "value": "retired"}]}
+        {"root": "widget", "where": {"combinator": "AND",
+         "children": [{"field": "widget.status", "op": "=", "value": "retired"}]}}
     )
     resolved, unresolved = resolve_values(payload, registry.root("widget"), now_year=2026)
-    assert resolved.conditions[0].value == "X"
+    assert resolved.where.children[0].value == "X"
     assert unresolved == []
 
 
 def test_resolve_values_rewrites_a_relative_year(registry):
     payload = Payload.model_validate(
-        {"root": "widget", "combinator": "AND",
-         "conditions": [{"field": "widget.year", "op": "=", "value": "last year"}]}
+        {"root": "widget", "where": {"combinator": "AND",
+         "children": [{"field": "widget.year", "op": "=", "value": "last year"}]}}
     )
     resolved, _ = resolve_values(payload, registry.root("widget"), now_year=2026)
-    assert resolved.conditions[0].value == 2025
+    assert resolved.where.children[0].value == 2025
 
 
 def test_resolve_values_rewrites_money_including_value2(registry):
     payload = Payload.model_validate(
-        {"root": "widget", "combinator": "AND",
-         "conditions": [{"field": "widget.price", "op": "between",
-                         "value": "$10,000", "value2": "$20,000"}]}
+        {"root": "widget", "where": {"combinator": "AND",
+         "children": [{"field": "widget.price", "op": "between",
+                       "value": "$10,000", "value2": "$20,000"}]}}
     )
     resolved, _ = resolve_values(payload, registry.root("widget"), now_year=2026)
-    assert (resolved.conditions[0].value, resolved.conditions[0].value2) == (10000.0, 20000.0)
+    assert (resolved.where.children[0].value, resolved.where.children[0].value2) == (
+        10000.0, 20000.0)
 
 
 def test_placeholders_pass_through_untouched(registry):
     """The host re-injects the real name and resolves it against its data."""
     payload = Payload.model_validate(
-        {"root": "vendor", "combinator": "AND",
-         "conditions": [{"field": "vendor.name", "op": "contains", "value": "<NAME_1>"}]}
+        {"root": "vendor", "where": {"combinator": "AND",
+         "children": [{"field": "vendor.name", "op": "contains", "value": "<NAME_1>"}]}}
     )
     resolved, unresolved = resolve_values(payload, registry.root("vendor"), now_year=2026)
-    assert resolved.conditions[0].value == "<NAME_1>"
+    assert resolved.where.children[0].value == "<NAME_1>"
     assert unresolved == []
 
 
 def test_an_unmatched_vocabulary_value_is_reported_not_guessed(registry):
     payload = Payload.model_validate(
-        {"root": "widget", "combinator": "AND",
-         "conditions": [{"field": "widget.status", "op": "=", "value": "banana"}]}
+        {"root": "widget", "where": {"combinator": "AND",
+         "children": [{"field": "widget.status", "op": "=", "value": "banana"}]}}
     )
     resolved, unresolved = resolve_values(payload, registry.root("widget"), now_year=2026)
     assert unresolved == ["widget.status=banana"]
-    assert resolved.conditions[0].value == "banana"
+    assert resolved.where.children[0].value == "banana"
 
 
 def test_valueless_operators_are_left_alone(registry):
     payload = Payload.model_validate(
-        {"root": "widget", "combinator": "AND",
-         "conditions": [{"field": "widget.certified", "op": "is_true"}]}
+        {"root": "widget", "where": {"combinator": "AND",
+         "children": [{"field": "widget.certified", "op": "is_true"}]}}
     )
     resolved, unresolved = resolve_values(payload, registry.root("widget"), now_year=2026)
-    assert resolved.conditions[0].value is None
+    assert resolved.where.children[0].value is None
     assert unresolved == []
 
 
 def test_a_field_missing_from_the_root_is_passed_through(registry):
     """Validation already rejected it; resolution must not crash on it."""
     payload = Payload.model_validate(
-        {"root": "widget", "combinator": "AND",
-         "conditions": [{"field": "unknown.field", "op": "=", "value": "z"}]}
+        {"root": "widget", "where": {"combinator": "AND",
+         "children": [{"field": "unknown.field", "op": "=", "value": "z"}]}}
     )
     resolved, unresolved = resolve_values(payload, registry.root("widget"), now_year=2026)
-    assert resolved.conditions[0].value == "z"
+    assert resolved.where.children[0].value == "z"
     assert unresolved == []
 
 
@@ -143,12 +144,12 @@ def test_money_rejects_non_finite_values(raw):
 def test_a_non_finite_money_value_is_reported_unresolved(registry):
     """End to end: the rejection must surface in `unresolved`, not vanish."""
     payload = Payload.model_validate(
-        {"root": "widget", "combinator": "AND",
-         "conditions": [{"field": "widget.price", "op": ">", "value": "1e400"}]}
+        {"root": "widget", "where": {"combinator": "AND",
+         "children": [{"field": "widget.price", "op": ">", "value": "1e400"}]}}
     )
     resolved, unresolved = resolve_values(payload, registry.root("widget"), now_year=2026)
     assert unresolved == ["widget.price=1e400"]
-    assert resolved.conditions[0].value == "1e400", "left as written, not coerced"
+    assert resolved.where.children[0].value == "1e400", "left as written, not coerced"
 
 
 def test_a_code_beats_another_entrys_synonym(registry):
@@ -174,13 +175,13 @@ def test_a_vocabulary_beats_the_type_parser(registry):
     )
     assert resolve_vocabulary(spec, "unpriced") == "Z"
     payload = Payload.model_validate(
-        {"root": "widget", "combinator": "AND",
-         "conditions": [{"field": "widget.price", "op": "=", "value": "unpriced"}]}
+        {"root": "widget", "where": {"combinator": "AND",
+         "children": [{"field": "widget.price", "op": "=", "value": "unpriced"}]}}
     )
     root = registry.root("widget")
     patched = root.model_copy(update={"fields": tuple(
         spec if f.key == "widget.price" else f for f in root.fields
     )})
     resolved, unresolved = resolve_values(payload, patched, now_year=2026)
-    assert resolved.conditions[0].value == "Z"
+    assert resolved.where.children[0].value == "Z"
     assert unresolved == []

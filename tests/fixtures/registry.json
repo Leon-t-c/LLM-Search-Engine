@@ -16,7 +16,7 @@
       "fields": [
         {"key": "widget.region", "table": "widget", "column": "region",
          "label": "Region", "type": "text", "group": "Location & Identity",
-         "operators": ["=", "iequals", "!=", "contains", "starts_with", "is_blank", "is_not_blank"],
+         "operators": ["=", "iequals", "!=", "in", "contains", "starts_with", "is_blank", "is_not_blank"],
          "vocabulary": [
            {"code": "N", "meaning": "North", "synonyms": ["northern", "up north"]},
            {"code": "S", "meaning": "South", "synonyms": ["southern"]}
@@ -31,7 +31,7 @@
          "vocabulary": []},
         {"key": "widget.status", "table": "widget", "column": "status",
          "label": "Status", "type": "text", "group": "Lifecycle",
-         "operators": ["=", "!=", "contains", "starts_with", "is_blank", "is_not_blank"],
+         "operators": ["=", "!=", "in", "contains", "starts_with", "is_blank", "is_not_blank"],
          "vocabulary": [
            {"code": "A", "meaning": "Active", "synonyms": ["live", "in service"]},
            {"code": "X", "meaning": "Retired", "synonyms": ["decommissioned", "dead"]}

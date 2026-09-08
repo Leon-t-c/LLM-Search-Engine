@@ -8,10 +8,17 @@ Every problem is collected before raising, so a caller sees the whole picture
 rather than the first failure.
 """
 from ..registry.models import Registry, RootSpec
-from .payload import NO_VALUE_OPS, Payload
+from .payload import LIST_OPS, NO_VALUE_OPS, Condition, Payload, iter_conditions
+from .schema import MAX_GROUP_DEPTH
 
 NUMERIC_AGG_TYPES = frozenset({"number", "money"})
 _NEEDS_TWO_VALUES = "between"
+
+
+def _depth(node, level: int = 1) -> int:
+    if isinstance(node, Condition) or node is None:
+        return level - 1
+    return max((_depth(c, level + 1) for c in node.children), default=level)
 
 
 class PayloadError(ValueError):
@@ -34,8 +41,10 @@ def validate_payload(raw: dict | Payload, registry: Registry) -> Payload:
     aliases, agg_problems = _check_aggregates(payload, root, available)
     problems += agg_problems
     problems += _check_having_and_sort(payload, root, available, aliases)
-    if not payload.conditions and not payload.aggregate:
+    if payload.where is None and not payload.aggregate:
         problems.append("a payload needs at least one condition")
+    if payload.where is not None and _depth(payload.where) > MAX_GROUP_DEPTH:
+        problems.append(f"conditions are nested more than {MAX_GROUP_DEPTH} levels deep")
     if problems:
         raise PayloadError(problems)
     return payload
@@ -78,7 +87,7 @@ def _resolve_field(key: str, available: dict, all_fields: dict, label: str):
 def _check_conditions(payload: Payload, root: RootSpec, available: dict) -> list[str]:
     problems = []
     all_fields = root.fields_by_key
-    for cond in payload.conditions:
+    for cond in iter_conditions(payload.where):
         spec, problem = _resolve_field(cond.field, available, all_fields, "field")
         if problem is not None:
             problems.append(problem)
@@ -89,6 +98,14 @@ def _check_conditions(payload: Payload, root: RootSpec, available: dict) -> list
         if cond.op in NO_VALUE_OPS:
             if cond.value is not None or cond.value2 is not None:
                 problems.append(f"{cond.op!r} on {spec.label!r} takes no value")
+            continue
+        is_list = isinstance(cond.value, tuple)
+        if cond.op in LIST_OPS:
+            if not is_list or not cond.value:
+                problems.append("'in' needs at least one value")
+                continue
+        elif is_list:
+            problems.append(f"{spec.label!r} takes a single value")
             continue
         if cond.value is None or cond.value == "":
             problems.append(f"{spec.label!r} requires a value")

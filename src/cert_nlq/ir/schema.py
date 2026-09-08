@@ -9,7 +9,7 @@ a text operator, and that combination is what validation, not the schema,
 rejects.
 """
 import json
-from typing import Literal, Sequence
+from typing import Literal, Sequence, Union
 
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
@@ -22,6 +22,12 @@ _NO_JOIN = "__none__"
 #: Comparison operators legal against an aggregate in `having`. Fixed, and
 #: independent of the registry — an aggregate is always a number.
 HAVING_OPS = ("=", "!=", ">", "<", ">=", "<=")
+
+#: Levels of grouping the generated schema offers. Finite by construction —
+#: Group1 holds conditions only, GroupN holds conditions or Group(N-1) — so
+#: nothing is self-referential and no provider depth limit applies. Measured:
+#: two extra levels cost about 600 bytes on a 110-field slice.
+MAX_GROUP_DEPTH = 3
 
 
 def fields_in_scope(
@@ -71,9 +77,26 @@ def build_payload_model(
         __config__=ConfigDict(frozen=True),
         field=(Literal[keys], ...),
         op=(Literal[ops], ...),
-        value=(str | int | float | bool | None, None),
+        value=(str | int | float | bool | tuple[str | int | float | bool, ...] | None, None),
         value2=(str | int | float | bool | None, None),
     )
+
+    # A finite chain rather than a recursive definition — Group1 holds
+    # conditions only, GroupN holds conditions or Group(N-1) — so nothing in
+    # the generated schema is self-referential.
+    node = condition
+    for level in range(1, MAX_GROUP_DEPTH + 1):
+        node = create_model(
+            f"{title}Group{level}",
+            __config__=ConfigDict(frozen=True),
+            combinator=(Literal["AND", "OR"], ...),
+            children=(
+                tuple[condition if level == 1 else Union[condition, node], ...],
+                ...,
+            ),
+        )
+    where = node
+
     aggregate = create_model(
         f"{title}Aggregate",
         __config__=ConfigDict(frozen=True, populate_by_name=True),
@@ -97,8 +120,7 @@ def build_payload_model(
         f"{title}Payload",
         __config__=ConfigDict(frozen=True, populate_by_name=True),
         root=(Literal[(root.root,)], ...),
-        combinator=(Literal["AND", "OR"], "AND"),
-        conditions=(tuple[condition, ...], ()),
+        where=(where | None, None),
         columns=(tuple[Literal[keys], ...], ()),
         join=(tuple[Literal[join_names], ...], ()),
         aggregate=(tuple[aggregate, ...], ()),

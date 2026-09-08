@@ -6,11 +6,11 @@ from cert_nlq.ir.payload import Aggregate, Payload, Sort
 
 def test_minimal_payload_round_trips():
     payload = Payload.model_validate(
-        {"root": "widget", "combinator": "AND",
-         "conditions": [{"field": "widget.status", "op": "=", "value": "A"}]}
+        {"root": "widget", "where": {"combinator": "AND",
+         "children": [{"field": "widget.status", "op": "=", "value": "A"}]}}
     )
     assert payload.root == "widget"
-    assert payload.conditions[0].value == "A"
+    assert payload.where.children[0].value == "A"
     assert payload.join == ()
     assert payload.sort is None
 
@@ -28,7 +28,9 @@ def test_aggregate_function_must_be_enumerated():
 
 def test_combinator_must_be_and_or_or():
     with pytest.raises(ValidationError):
-        Payload.model_validate({"root": "widget", "combinator": "XOR", "conditions": []})
+        Payload.model_validate({"root": "widget", "where": {
+            "combinator": "XOR",
+            "children": [{"field": "widget.status", "op": "=", "value": "A"}]}})
 
 
 def test_sort_requires_exactly_one_of_field_or_agg():
@@ -46,8 +48,8 @@ def test_sort_direction_is_constrained():
 def test_full_aggregate_payload_parses():
     payload = Payload.model_validate({
         "root": "widget",
-        "combinator": "AND",
-        "conditions": [{"field": "widget.year", "op": "=", "value": 2024}],
+        "where": {"combinator": "AND",
+                  "children": [{"field": "widget.year", "op": "=", "value": 2024}]},
         "join": ["shipment"],
         "aggregate": [{"fn": "sum", "field": "shipment.amount", "as": "total"},
                       {"fn": "count", "field": "*", "as": "n"}],

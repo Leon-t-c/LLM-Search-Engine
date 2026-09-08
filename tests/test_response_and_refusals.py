@@ -2,10 +2,10 @@ import pytest
 from pydantic import ValidationError
 
 from cert_nlq.ir.response import Candidate, Flag, NeedsClarification, Ok, Refused
-from cert_nlq.translate.refusals import RefusalReason, looks_nested
+from cert_nlq.translate.refusals import RefusalReason
 
-PAYLOAD = {"root": "widget", "combinator": "AND",
-           "conditions": [{"field": "widget.status", "op": "=", "value": "A"}]}
+PAYLOAD = {"root": "widget", "where": {"combinator": "AND",
+           "children": [{"field": "widget.status", "op": "=", "value": "A"}]}}
 
 
 def test_ok_serialises_with_a_status_discriminator():
@@ -75,42 +75,3 @@ def test_ambiguous_is_not_a_refusal_reason():
 def test_needs_aggregation_is_not_a_refusal_reason():
     """Aggregation is a core requirement carried by the IR, not an edge case."""
     assert "needs_aggregation" not in {r.value for r in RefusalReason}
-
-
-@pytest.mark.parametrize(
-    "question",
-    ["(settled or withdrawn) and filed in 2024",
-     "widgets in (the north or the south) and shipped in 2024"],
-)
-def test_nested_logic_is_detected(question):
-    """An explicit parenthesised disjunction plus a conjunction."""
-    assert looks_nested(question) is True
-
-
-@pytest.mark.parametrize(
-    "question",
-    [
-        # No disjunction at all.
-        "active widgets in the north",
-        # A disjunction with no conjunction — one OR combinator expresses it.
-        "widgets shipped in 2024 or 2025",
-        "north or south widgets",
-        # Parenthesised, but still a plain disjunction. Parentheses alone are
-        # not a nesting signal, and an earlier draft wrongly refused these.
-        "(settled or withdrawn) widgets",
-        "widgets that are (active or retired)",
-        # Idiomatic "or" in ordinary date phrasing. These are single flat
-        # conjunctions and refusing them costs the user an answer for nothing.
-        "widgets filed on or before 2024-01-01, and settled",
-        "widgets filed on or after 2023-06-01, and shipped in 2024",
-        "widgets due on or before June, and not yet certified",
-        "widgets that are more or less finished, and shipped this year",
-        # Genuine nesting without parentheses. NOT caught on purpose: the
-        # pattern that caught it also refused the four cases above. The model
-        # is instructed to refuse this, and the harness measures how often it
-        # actually does.
-        "widgets that are active or retired, and shipped in 2024",
-    ],
-)
-def test_answerable_questions_are_not_flagged(question):
-    assert looks_nested(question) is False

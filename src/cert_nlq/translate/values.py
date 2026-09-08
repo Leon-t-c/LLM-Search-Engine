@@ -10,7 +10,7 @@ resolve — this service has no data access.
 import math
 import re
 
-from ..ir.payload import NO_VALUE_OPS, Payload
+from ..ir.payload import NO_VALUE_OPS, Group, Payload
 from ..registry.models import FieldSpec, RootSpec
 
 #: Entity placeholders the host substituted before the question was sent.
@@ -104,6 +104,37 @@ def _resolve_one(spec: FieldSpec, raw, now_year: int):
     return raw, True
 
 
+def _resolve_node(node, by_key: dict, now_year: int, unresolved: list[str]):
+    """Resolve one leaf, or recurse into a group's children.
+
+    A list value (`in`) is resolved element by element: each unresolved
+    element is reported individually, and the list is left exactly as
+    written if any element fails, rather than half-rewritten.
+    """
+    if isinstance(node, Group):
+        return node.model_copy(update={"children": tuple(
+            _resolve_node(c, by_key, now_year, unresolved) for c in node.children
+        )})
+    spec = by_key.get(node.field)
+    if spec is None or node.op in NO_VALUE_OPS:
+        return node
+    if isinstance(node.value, tuple):
+        parts = [_resolve_one(spec, v, now_year) for v in node.value]
+        unresolved.extend(
+            f"{node.field}={raw}" for raw, (_, ok) in zip(node.value, parts) if not ok
+        )
+        if all(ok for _, ok in parts):
+            return node.model_copy(update={"value": tuple(v for v, _ in parts)})
+        return node
+    value, ok = _resolve_one(spec, node.value, now_year)
+    value2, ok2 = _resolve_one(spec, node.value2, now_year)
+    if not ok:
+        unresolved.append(f"{node.field}={node.value}")
+    if not ok2:
+        unresolved.append(f"{node.field}={node.value2}")
+    return node.model_copy(update={"value": value, "value2": value2})
+
+
 def resolve_values(
     payload: Payload, root: RootSpec, now_year: int
 ) -> tuple[Payload, list[str]]:
@@ -113,18 +144,10 @@ def resolve_values(
     caller can flag the condition or ask (the confidence ladder).
     """
     by_key = root.fields_by_key
-    conditions = []
     unresolved: list[str] = []
-    for cond in payload.conditions:
-        spec = by_key.get(cond.field)
-        if spec is None or cond.op in NO_VALUE_OPS:
-            conditions.append(cond)
-            continue
-        value, ok = _resolve_one(spec, cond.value, now_year)
-        value2, ok2 = _resolve_one(spec, cond.value2, now_year)
-        if not ok:
-            unresolved.append(f"{cond.field}={cond.value}")
-        if not ok2:
-            unresolved.append(f"{cond.field}={cond.value2}")
-        conditions.append(cond.model_copy(update={"value": value, "value2": value2}))
-    return payload.model_copy(update={"conditions": tuple(conditions)}), unresolved
+    where = (
+        _resolve_node(payload.where, by_key, now_year, unresolved)
+        if payload.where is not None
+        else None
+    )
+    return payload.model_copy(update={"where": where}), unresolved
