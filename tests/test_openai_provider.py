@@ -206,11 +206,13 @@ def test_a_truncated_response_names_the_cap_not_the_json():
     assert "JSON" not in message
 
 
-def test_the_cached_count_is_taken_out_of_the_input_total():
-    """This vendor's prompt total includes the cached reads.
+def test_both_cache_counts_are_taken_out_of_the_input_total():
+    """This vendor's prompt total includes both cache counters.
 
-    The other vendor's does not, so reporting the raw total would make the
-    two adapters' input counts mean different things and stop them summing.
+    They are breakdowns of the prompt, not siblings of it, so reporting the
+    raw total against either of them counts those tokens twice. The other
+    vendor reports siblings, so the two adapters only stay addable if the
+    three input keys here partition the prompt total exactly.
     """
     usage = SimpleNamespace(
         prompt_tokens=120,
@@ -225,12 +227,18 @@ def test_the_cached_count_is_taken_out_of_the_input_total():
     OpenAIProvider("key", "m", client=client, on_usage=seen.append).complete(
         "sys", "q", SCHEMA, "R"
     )
-    assert seen[0]["uncached_input_tokens"] == 56
     assert seen[0]["cached_input_tokens"] == 64
-    assert (
-        seen[0]["uncached_input_tokens"] + seen[0]["cached_input_tokens"] == 120
-    )
     assert seen[0]["cache_write_tokens"] == 16
+    assert seen[0]["uncached_input_tokens"] == 40
+    # The three-way sum, with a non-zero write count. A two-way assertion
+    # stays true while the write count is double-counted, which is how that
+    # defect survived a test that looked like it covered this.
+    assert (
+        seen[0]["uncached_input_tokens"]
+        + seen[0]["cached_input_tokens"]
+        + seen[0]["cache_write_tokens"]
+        == 120
+    )
     assert seen[0]["reasoning_tokens"] == 5
 
 

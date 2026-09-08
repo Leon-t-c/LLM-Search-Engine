@@ -146,10 +146,14 @@ class OpenAIProvider:
         """Hand token counts to the caller. Never fail the call over this.
 
         The keys are the shared, non-overlapping set — see USAGE_TOKEN_KEYS.
-        This vendor's `prompt_tokens` is a total that *includes* the cached
-        reads, while the other vendor reports the two side by side, so the
-        cached count is subtracted back out here. That is what makes a single
-        key summable across a golden set answered by both adapters.
+        This vendor's `prompt_tokens` is a total, and *both* cache counters
+        are breakdowns of it: they arrive on a detail object the SDK
+        documents as the breakdown of the prompt, and the write count is
+        described as a number of prompt tokens. The other vendor reports
+        counters that sit beside each other instead, so both are subtracted
+        back out here. Subtracting only the reads leaves the three input keys
+        summing past the total, which is the overlap this key set exists to
+        rule out.
         """
         if self._on_usage is None:
             return
@@ -161,17 +165,18 @@ class OpenAIProvider:
         prompt_detail = getattr(usage, "prompt_tokens_details", None)
         output_detail = getattr(usage, "completion_tokens_details", None)
         cached = token_count(prompt_detail, "cached_tokens")
+        cache_write = token_count(prompt_detail, "cache_write_tokens")
         record = {
             "schema_name": schema_name,
             "model": model,
-            # Clamped at zero: a breakdown that ever came back larger than
-            # the total it belongs to would otherwise make the sum negative,
+            # Clamped at zero: breakdowns that ever came back larger than
+            # the total they belong to would otherwise make the sum negative,
             # which is worse than a slightly wrong split.
             "uncached_input_tokens": max(
-                token_count(usage, "prompt_tokens") - cached, 0
+                token_count(usage, "prompt_tokens") - cached - cache_write, 0
             ),
             "cached_input_tokens": cached,
-            "cache_write_tokens": token_count(prompt_detail, "cache_write_tokens"),
+            "cache_write_tokens": cache_write,
             "output_tokens": token_count(usage, "completion_tokens"),
             "reasoning_tokens": token_count(output_detail, "reasoning_tokens"),
         }

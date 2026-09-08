@@ -213,7 +213,13 @@ def test_the_record_carries_exactly_the_shared_keys():
 
 
 def test_the_input_count_already_excludes_the_cached_reads():
-    """This vendor's counters sit beside each other; nothing is subtracted."""
+    """This vendor's counters sit beside each other; nothing is subtracted.
+
+    The invariant is the same one the other adapter has to arithmetic its way
+    to: the three input keys partition the request's input, counting no token
+    twice. Here the vendor already reports them that way, so the total is
+    their sum rather than a separate field.
+    """
     usage = SimpleNamespace(
         input_tokens=12,
         output_tokens=8,
@@ -229,6 +235,12 @@ def test_the_input_count_already_excludes_the_cached_reads():
     assert seen[0]["uncached_input_tokens"] == 12
     assert seen[0]["cached_input_tokens"] == 900
     assert seen[0]["cache_write_tokens"] == 64
+    assert (
+        seen[0]["uncached_input_tokens"]
+        + seen[0]["cached_input_tokens"]
+        + seen[0]["cache_write_tokens"]
+        == 12 + 900 + 64
+    )
     assert seen[0]["reasoning_tokens"] == 5
 
 
