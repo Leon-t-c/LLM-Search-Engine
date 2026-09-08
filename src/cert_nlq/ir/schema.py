@@ -16,8 +16,19 @@ from pydantic import BaseModel, ConfigDict, Field, create_model
 from ..registry.models import FieldSpec, RootSpec
 from .payload import Having, Sort
 
-#: Stands in for "no joins available" — `Literal[()]` is not constructible.
-_NO_JOIN = "__none__"
+#: Stands in for "no joins available".
+#:
+#: `join` is a required slot in a closed schema, and its item type is a
+#: Literal union, and `Literal[()]` is not constructible — so a root with no
+#: joins at all still has to offer the slot *something*. This placeholder is
+#: that something. It means "there are no joins here", not "there is a join
+#: called this", and no registry can ever contain a table by this name.
+#:
+#: A model that follows the schema exactly may therefore put it in `join`, and
+#: validation — which only knows real tables — would reject it. The translator
+#: filters it out before validating; see `_normalise` there. Public for that
+#: reason: the two ends have to agree on the spelling.
+NO_JOIN = "__none__"
 
 #: Comparison operators legal against an aggregate in `having`. Fixed, and
 #: independent of the registry — an aggregate is always a number.
@@ -78,7 +89,7 @@ def build_payload_model(
 
     keys = tuple(f.key for f in scoped)
     ops = tuple(sorted({op for f in scoped for op in f.operators}))
-    join_names = tuple(j.table for j in root.joins) or (_NO_JOIN,)
+    join_names = tuple(j.table for j in root.joins) or (NO_JOIN,)
     title = root.root.replace("_", " ").title().replace(" ", "")
 
     condition = create_model(

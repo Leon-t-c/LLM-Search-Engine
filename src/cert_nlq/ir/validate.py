@@ -9,7 +9,7 @@ rather than the first failure.
 """
 from ..registry.models import Registry, RootSpec
 from .payload import LIST_OPS, NO_VALUE_OPS, Condition, Payload, iter_conditions
-from .schema import MAX_GROUP_DEPTH
+from .schema import HAVING_OPS, MAX_GROUP_DEPTH
 
 NUMERIC_AGG_TYPES = frozenset({"number", "money"})
 _NEEDS_TWO_VALUES = "between"
@@ -42,7 +42,9 @@ def validate_payload(raw: dict | Payload, registry: Registry) -> Payload:
     problems += agg_problems
     problems += _check_having_and_sort(payload, root, available, aliases)
     if payload.where is None and not payload.aggregate:
-        problems.append("a payload needs at least one condition")
+        problems.append(
+            "a payload needs at least one condition or one aggregate"
+        )
     if payload.where is not None and _depth(payload.where) > MAX_GROUP_DEPTH:
         problems.append(f"conditions are nested more than {MAX_GROUP_DEPTH} levels deep")
     if problems:
@@ -156,11 +158,18 @@ def _check_aggregates(
 def _check_having_and_sort(
     payload: Payload, root: RootSpec, available: dict, aliases: set[str]
 ) -> list[str]:
-    problems = [
-        f"having references unknown alias {clause.agg!r}"
-        for clause in payload.having
-        if clause.agg not in aliases
-    ]
+    problems: list[str] = []
+    for clause in payload.having:
+        if clause.agg not in aliases:
+            problems.append(f"having references unknown alias {clause.agg!r}")
+        # The generated schema closes this slot to the same six comparisons,
+        # so a structured-output call cannot reach here — but this function is
+        # the gate the caller re-checks against, and it is the only one a
+        # payload assembled by anything else passes through. Read from the
+        # schema's own constant: two lists saying the same thing today are two
+        # lists that can drift.
+        if clause.op not in HAVING_OPS:
+            problems.append(f"having operator {clause.op!r} is not a comparison")
     sort = payload.sort
     if sort is None:
         return problems

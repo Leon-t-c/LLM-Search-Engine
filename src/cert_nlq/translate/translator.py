@@ -12,7 +12,7 @@ from ..ir.response import (
     TranslateResponse,
     Unresolved,
 )
-from ..ir.schema import json_schema_for
+from ..ir.schema import NO_JOIN, json_schema_for
 from ..ir.validate import PayloadError, validate_payload
 from ..registry.models import Registry, RootSpec
 from .provider import Provider
@@ -26,6 +26,8 @@ TRANSLATOR_SYSTEM = (
     "Conditions form a tree of AND/OR groups, nested as deep as the shape "
     "offers. Nest a group only when the question genuinely needs mixed logic, "
     "such as (A or B) and C; keep it flat otherwise.\n"
+    "A group needs at least one child. Leave a group out rather than sending "
+    "an empty one.\n"
     "Prefer the `in` operator over a group when one field takes several "
     "values: `status in [A, B]` rather than a group of two equalities.\n"
     "For a value from a coded field, write the meaning in plain words; a later "
@@ -100,7 +102,7 @@ def _translate_stage_two(
             schema_name=f"{root.root}Payload",
         )
         try:
-            proposed = Payload.model_validate(raw)
+            proposed = Payload.model_validate(_normalise(raw))
             return validate_payload(_with_router_joins(proposed, chosen), registry), ""
         except (PayloadError, ValidationError) as exc:
             problem = str(exc)
@@ -111,6 +113,67 @@ def _translate_stage_two(
                 f"{hint}"
             )
     return None, problem
+
+
+def _drop_empty_groups(node):
+    """Remove every group with no children, innermost first.
+
+    A dict without a `children` key is a leaf condition and is returned as it
+    came. Anything that is not the expected shape is also returned untouched:
+    this runs on raw provider output, and a malformed answer must still reach
+    parsing and fail there with a message about what is actually wrong.
+    """
+    if not isinstance(node, dict) or "children" not in node:
+        return node
+    children = node.get("children")
+    if not isinstance(children, (list, tuple)):
+        return node
+    kept = [k for k in (_drop_empty_groups(c) for c in children) if k is not None]
+    if not kept:
+        return None
+    return {**node, "children": kept}
+
+
+def _normalise(raw):
+    """Reconcile the shapes the schema offers with the ones validation accepts.
+
+    Three payloads are legal under the constrained schema and were refused
+    downstream. Every one of them costs the same thing: a model that followed
+    the schema exactly spends the single retry on a shape the schema itself
+    put in front of it, and a second such shape in the same answer is a
+    refusal for a question that had a perfectly good answer. So each is
+    rewritten here into the thing it plainly means, rather than bounced back.
+
+    * A group with no children. The strict subset both vendors accept has no
+      array-length keyword, so "at least one child" cannot be stated in the
+      schema at all — tightening it is not an option. An empty group carries
+      no meaning, so it goes, the way an emptied one does in `_without_field`.
+      The prompt discourages it too; this is the backstop.
+    * The no-joins placeholder. A root with no joins still has to offer the
+      required `join` slot something — see `NO_JOIN` — and it means "no
+      joins", not a table by that name. Filtered out, so following the schema
+      exactly is not punished.
+    * A `sort` object naming neither of its two targets. `sort` is nullable
+      *and* required, and both of its targets are nullable, so the closed
+      schema offers two ways to say "no sort" and only one of them parsed.
+      An object saying nothing about what to sort by is no sort.
+
+    An object naming *both* sort targets is left alone: that is genuinely
+    ambiguous, not a shape the schema pushed the model into, and it should
+    fail and be retried.
+    """
+    if not isinstance(raw, dict):
+        return raw
+    out = dict(raw)
+    join = out.get("join")
+    if isinstance(join, (list, tuple)):
+        out["join"] = [table for table in join if table != NO_JOIN]
+    if "where" in out:
+        out["where"] = _drop_empty_groups(out["where"])
+    sort = out.get("sort")
+    if isinstance(sort, dict) and sort.get("field") is None and sort.get("agg") is None:
+        out["sort"] = None
+    return out
 
 
 def _with_router_joins(payload: Payload, chosen: Route) -> Payload:
