@@ -1,5 +1,6 @@
 """Settings, from the environment only. No secret is ever committed."""
 from functools import lru_cache
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -16,8 +17,10 @@ class Settings(BaseSettings):
     #: Cheaper model for stage-1 routing. Falls back to `model` when blank.
     router_model: str = ""
 
-    #: Which translator backend to build: "openai" | "claude".
-    provider: str = "openai"
+    #: Which translator backend to build. Closed, so a near miss — a capital
+    #: letter, a trailing space — fails at boot with a settings error naming
+    #: the field, rather than surviving until something deeper cannot place it.
+    provider: Literal["openai", "claude"] = "openai"
     anthropic_api_key: str = ""
     claude_model: str = "claude-opus-5"
 

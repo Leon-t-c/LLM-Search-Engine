@@ -10,6 +10,7 @@ accounting on every call.
 """
 import json
 import logging
+import re
 
 from .provider import ProviderError
 from .router import ROUTE_SCHEMA_NAME
@@ -30,6 +31,16 @@ MAX_OUTPUT_TOKENS = 8000
 #: returns an unknown-parameter error, switch this one constant.
 OUTPUT_TOKEN_PARAM = "max_completion_tokens"
 
+#: The vendor constrains the response-format name to this class, at most 64
+#: characters. The name is derived from registry data, which nothing
+#: validates on the way in, so it is sanitised rather than trusted.
+_NAME_ALLOWED = re.compile(r"[^a-zA-Z0-9_-]")
+_NAME_MAX = 64
+
+#: Used when sanitising leaves nothing at all; the name is a label the vendor
+#: echoes back, so any legal string will do, but it may not be empty.
+_NAME_FALLBACK = "payload"
+
 
 class OpenAIProvider:
     def __init__(
@@ -43,6 +54,11 @@ class OpenAIProvider:
     ) -> None:
         if client is None and not api_key:
             raise ProviderError("no API key configured for the OpenAI provider")
+        # Checked alongside the key, and for the same reason: the setting it
+        # comes from also defaults to blank, so a deploy that sets only the
+        # key would otherwise build a provider that fails on every call.
+        if not model:
+            raise ProviderError("no model configured for the OpenAI provider")
         self._model = model
         self._router_model = router_model
         self._max_output_tokens = max_output_tokens
@@ -53,6 +69,11 @@ class OpenAIProvider:
             from openai import OpenAI
 
             self._client = OpenAI(api_key=api_key)
+
+    @staticmethod
+    def _format_name(schema_name: str) -> str:
+        name = _NAME_ALLOWED.sub("", schema_name)[:_NAME_MAX]
+        return name or _NAME_FALLBACK
 
     def _model_for(self, schema_name: str) -> str:
         """Stage 1 is a classification call and does not need the big model.
@@ -81,7 +102,7 @@ class OpenAIProvider:
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {
-                    "name": schema_name,
+                    "name": self._format_name(schema_name),
                     "strict": True,
                     "schema": schema,
                 },

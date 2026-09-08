@@ -25,3 +25,20 @@ def test_get_settings_is_cached_and_clearable(monkeypatch):
         assert get_settings().model == "second"
     finally:
         get_settings.cache_clear()
+
+
+def test_the_provider_setting_is_closed(monkeypatch):
+    """A near miss must fail at boot, not deeper in with a vaguer message."""
+    import pytest
+    from pydantic import ValidationError
+
+    for value in ("OpenAI", "claude ", "gemini"):
+        monkeypatch.setenv("CERT_NLQ_PROVIDER", value)
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None)
+
+
+def test_the_provider_setting_accepts_both_backends(monkeypatch):
+    for value in ("openai", "claude"):
+        monkeypatch.setenv("CERT_NLQ_PROVIDER", value)
+        assert Settings(_env_file=None).provider == value

@@ -224,3 +224,35 @@ def test_absent_detail_blocks_do_not_break_the_call():
     assert provider.complete("sys", "q", SCHEMA, "R") == {"root": "widget"}
     assert seen[0]["cached_tokens"] is None
     assert seen[0]["reasoning_tokens"] is None
+
+
+def test_the_format_name_is_sanitised():
+    """The name is built from registry data, which nothing here validates."""
+    client, completions = _client(content=json.dumps({"root": "widget"}))
+    OpenAIProvider("key", "m", client=client).complete(
+        "sys", "q", SCHEMA, "open items (2024)/v2Payload"
+    )
+    assert completions.kwargs["response_format"]["json_schema"]["name"] == (
+        "openitems2024v2Payload"
+    )
+
+
+def test_the_format_name_is_truncated():
+    client, completions = _client(content=json.dumps({"root": "widget"}))
+    OpenAIProvider("key", "m", client=client).complete(
+        "sys", "q", SCHEMA, "a" * 200
+    )
+    assert len(completions.kwargs["response_format"]["json_schema"]["name"]) == 64
+
+
+def test_a_name_with_nothing_usable_still_produces_one():
+    client, completions = _client(content=json.dumps({"root": "widget"}))
+    OpenAIProvider("key", "m", client=client).complete("sys", "q", SCHEMA, "//")
+    name = completions.kwargs["response_format"]["json_schema"]["name"]
+    assert 1 <= len(name) <= 64
+
+
+def test_a_blank_model_fails_at_construction():
+    """The setting defaults to blank, so a key-only deploy must not build."""
+    with pytest.raises(ProviderError, match="no model"):
+        OpenAIProvider("key", "")

@@ -227,12 +227,19 @@ def test_provider_selection_honours_the_setting():
     assert isinstance(provider, ClaudeProvider)
 
 
-def test_an_unknown_provider_is_rejected():
-    from cert_nlq.api.app import _build_provider
-    from cert_nlq.config import Settings
+def test_an_unknown_provider_is_a_misconfiguration_not_a_provider_failure():
+    """ProviderError means the provider failed; nothing was even built here.
 
-    with pytest.raises(ProviderError, match="unknown provider"):
-        _build_provider(Settings(provider="gemini"))
+    The settings type makes this branch unreachable in practice, which is the
+    point of both halves.
+    """
+    from types import SimpleNamespace
+
+    from cert_nlq.api.app import _build_provider
+
+    with pytest.raises(ValueError, match="unknown provider") as caught:
+        _build_provider(SimpleNamespace(provider="gemini"))
+    assert not isinstance(caught.value, ProviderError)
 
 
 def test_both_providers_are_built_with_usage_accounting():

@@ -135,7 +135,10 @@ def _build_provider(settings) -> Provider:
             router_model=settings.router_model or None,
             on_usage=_log_usage,
         )
-    raise ProviderError(f"unknown provider {settings.provider!r}")
+    # Not a ProviderError: no provider failed, none was even constructed.
+    # The settings type closes this branch off before it can be reached,
+    # which is the point — it is here for the case that type is widened.
+    raise ValueError(f"unknown provider {settings.provider!r}")
 
 
 def make_app() -> FastAPI:
