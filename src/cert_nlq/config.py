@@ -12,6 +12,8 @@ class Settings(BaseSettings):
 
     registry_url: str = ""
     registry_token: str = ""
+    #: Inbound service token. Blank fails closed — see the API dependency.
+    service_token: str = ""
     openai_api_key: str = ""
     model: str = ""
     #: Cheaper model for stage-1 routing. Falls back to `model` when blank.

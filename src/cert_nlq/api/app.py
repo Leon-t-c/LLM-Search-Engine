@@ -4,8 +4,9 @@ Dependencies are passed to create_app explicitly rather than imported, so
 tests construct an app that cannot reach the network.
 """
 import logging
+import secrets
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
@@ -43,8 +44,37 @@ class TranslateRequest(BaseModel):
         return stripped
 
 
-def create_app(registry_client, provider: Provider) -> FastAPI:
+def _require_token(expected: str):
+    """Build the auth dependency for one configured token.
+
+    Comparison is constant-time: a plain `==` on a secret leaks its prefix
+    through timing, and this token guards an endpoint that spends money.
+
+    A blank `expected` fails closed with a 503 rather than waving requests
+    through. An unconfigured deploy should refuse to serve, not quietly serve
+    everyone — that is the difference between an outage you notice and an open
+    endpoint you do not.
+    """
+
+    def dependency(authorization: str = Header(default="")) -> None:
+        if not expected:
+            raise HTTPException(
+                status_code=503, detail="The query service is not configured."
+            )
+        scheme, _, presented = authorization.partition(" ")
+        if scheme.lower() != "bearer" or not secrets.compare_digest(
+            presented, expected
+        ):
+            raise HTTPException(status_code=401, detail="Not authorized.")
+
+    return dependency
+
+
+def create_app(
+    registry_client, provider: Provider, service_token: str = ""
+) -> FastAPI:
     app = FastAPI(title="cert-nlq", version="0.1.0")
+    guard = _require_token(service_token)
 
     @app.get("/healthz")
     def healthz():
@@ -61,7 +91,7 @@ def create_app(registry_client, provider: Provider) -> FastAPI:
             )
         return {"status": "ok", "registry_version": cached.version}
 
-    @app.post("/translate")
+    @app.post("/translate", dependencies=[Depends(guard)])
     def translate_endpoint(request: TranslateRequest) -> dict:
         try:
             registry = registry_client.fetch()
@@ -157,4 +187,5 @@ def make_app() -> FastAPI:
     return create_app(
         RegistryClient(settings.registry_url, settings.registry_token),
         _build_provider(settings),
+        settings.service_token,
     )

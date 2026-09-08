@@ -26,9 +26,23 @@ class StubRegistry:
         return self._registry
 
 
+#: The token these tests configure. Not a secret: it never leaves this file.
+TOKEN = "s3cret"
+
+
 def _client(registry, responses, error=None):
+    """An app with the guard configured, and a client that satisfies it.
+
+    The guard fails closed, so there is no such thing as an app without a
+    token: every test that exercises the endpoint behind it has to present
+    one. Sending the header from the client keeps that out of each test body.
+    """
     return TestClient(
-        create_app(StubRegistry(registry, error), FakeProvider(responses))
+        create_app(
+            StubRegistry(registry, error), FakeProvider(responses),
+            service_token=TOKEN,
+        ),
+        headers={"Authorization": f"Bearer {TOKEN}"},
     )
 
 
@@ -186,9 +200,10 @@ def test_no_database_driver_is_importable():
 def test_importing_the_app_module_builds_no_provider():
     """The production app must be a factory, not a module-level instance.
 
-    A module-level `app = make_app()` would construct a billable API client on
-    every import of this module — including every test run — and would fail
-    outright when no key is configured.
+    A module-level `app = make_app()` would construct a real, billable API
+    client on every import of this module, including every test run. Every
+    setting defaults to `""`, so it would not even fail outright on a missing
+    key — it would just start spending money.
     """
     import cert_nlq.api.app as module
 
@@ -255,3 +270,65 @@ def test_both_providers_are_built_with_usage_accounting():
     )
     assert claude._on_usage is not None
     assert openai._on_usage is not None
+
+
+GUARDED = {"question": "active widgets", "now_year": 2026}
+
+
+def _guarded_client(registry, responses, token=TOKEN):
+    return TestClient(
+        create_app(StubRegistry(registry), FakeProvider(responses),
+                   service_token=token)
+    )
+
+
+def test_a_request_without_a_token_is_rejected(registry):
+    response = _guarded_client(registry, []).post("/translate", json=GUARDED)
+    assert response.status_code == 401
+
+
+def test_a_request_with_the_wrong_token_is_rejected(registry):
+    response = _guarded_client(registry, []).post(
+        "/translate", json=GUARDED, headers={"Authorization": "Bearer wrong"}
+    )
+    assert response.status_code == 401
+
+
+def test_a_rejected_request_never_reaches_the_provider(registry):
+    """Auth must run before anything billable.
+
+    A 401 that still spent a model call would defeat the point of having one.
+    """
+    provider = FakeProvider([])
+    client = TestClient(
+        create_app(StubRegistry(registry), provider, service_token=TOKEN)
+    )
+    client.post("/translate", json=GUARDED)
+    assert provider.calls == []
+
+
+def test_a_request_with_the_right_token_is_translated(registry):
+    response = _guarded_client(registry, [ROUTE, GOOD]).post(
+        "/translate", json=GUARDED, headers={"Authorization": f"Bearer {TOKEN}"}
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+
+
+def test_healthz_needs_no_token(registry):
+    """Readiness probes should not carry a credential."""
+    response = _guarded_client(registry, []).get("/healthz")
+    assert response.status_code in (200, 503)
+
+
+def test_an_unconfigured_token_refuses_every_request(registry):
+    """Fail closed. A blank token must not mean 'authentication off'.
+
+    A misconfigured deploy that silently accepted everything is the exact
+    failure this endpoint cannot afford, and it is the one a default-empty
+    setting invites.
+    """
+    response = _guarded_client(registry, [], token="").post(
+        "/translate", json=GUARDED, headers={"Authorization": "Bearer anything"}
+    )
+    assert response.status_code == 503
