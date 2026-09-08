@@ -328,3 +328,27 @@ def test_the_strict_pass_leaves_every_hoisted_ref_bare(registry):
     schema = json_schema_for(registry.root("widget"))
     offenders = [n for n in _walk(schema) if "$ref" in n and set(n) != {"$ref"}]
     assert offenders == []
+
+
+def test_a_fixed_value_is_expressed_as_a_single_value_enum(registry):
+    """One vendor's normaliser knows `enum` and does not know `const`.
+
+    An unrecognised keyword is not an error there — it is demoted into the
+    description, which silently unconstrains the slot. `enum` means the same
+    thing for one value and both vendors support it, so nothing is lost.
+    """
+    for name in ("widget", "vendor"):
+        schema = json_schema_for(registry.root(name))
+        nodes = list(_walk(schema))
+        assert [n for n in nodes if "const" in n] == []
+        pinned = [n for n in nodes if isinstance(n.get("enum"), list)
+                  and len(n["enum"]) == 1]
+        assert pinned, "expected the single-value slot to stay constrained"
+        assert all(n.get("type") == "string" for n in pinned), (
+            "the sibling type must survive the rewrite"
+        )
+
+
+def test_the_single_valued_slot_names_exactly_the_one_legal_value(registry):
+    schema = json_schema_for(registry.root("widget"))
+    assert schema["properties"]["root"] == {"enum": ["widget"], "type": "string"}

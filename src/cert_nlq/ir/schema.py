@@ -224,6 +224,14 @@ def strictify(node):
         for key, value in node.items()
         if key not in ("default", "title")
     }
+    if "const" in rewritten:
+        # One vendor's normaliser handles a fixed keyword list, and `const`
+        # is not on it. An unrecognised keyword there is not rejected — it is
+        # folded into the description string, which leaves the slot
+        # unconstrained while looking constrained. A single-value `enum` says
+        # the same thing, is on both vendors' lists, and keeps any sibling
+        # `type`.
+        rewritten["enum"] = [rewritten.pop("const")]
     properties = rewritten.get("properties")
     if rewritten.get("type") != "object" and not isinstance(properties, dict):
         return rewritten
