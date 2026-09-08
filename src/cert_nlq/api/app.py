@@ -93,7 +93,9 @@ def create_app(registry_client, provider: Provider) -> FastAPI:
         # `by_alias=True` is REQUIRED, not cosmetic. `Aggregate.alias` is
         # serialised as `as` (a Python keyword), and without the flag this
         # emits `{"alias": ...}` — a payload the host's compiler does not
-        # understand. Corrected 2026-09-04 after Task 4 exposed it.
+        # understand. This has regressed silently before: every other test
+        # here reads the parsed model rather than the emitted JSON, so only
+        # a test against the wire format itself catches it.
         return response.model_dump(mode="json", by_alias=True)
 
     return app
@@ -103,15 +105,17 @@ def make_app() -> FastAPI:
     """The production app, built from settings.
 
     A factory, deliberately not a module-level `app = ...`. Importing this
-    module must stay free of side effects: a module-level call would construct
-    the real provider (and fail on a missing key) every time the test suite
-    imports `create_app`. Run it with uvicorn's factory flag:
+    module must stay free of side effects: a module-level call would
+    construct a real, billable client on every import of this module,
+    including every test run — every setting defaults to `""`, so it would
+    not even fail outright on a missing key; it would just start spending
+    money. Run it with uvicorn's factory flag:
 
         uvicorn cert_nlq.api.app:make_app --factory
 
-    The provider import is inside the function because
-    `translate.openai_provider` does not exist until Task 13. Nothing calls
-    `make_app` before then.
+    The provider import is inside the function because that provider module
+    does not exist yet in this codebase. Nothing calls `make_app` until it
+    does.
     """
     settings = get_settings()
     from ..translate.openai_provider import OpenAIProvider
