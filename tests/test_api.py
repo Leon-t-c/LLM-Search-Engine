@@ -96,6 +96,23 @@ def test_registry_unavailable_is_a_503(registry):
     assert "temporarily unavailable" in response.json()["detail"].lower()
 
 
+def test_a_registry_shaped_scope_failure_is_a_503_not_a_500(registry):
+    """A root offering no fields to translate against is a registry problem.
+
+    It must be told apart from a genuine bug in this service, which stays a
+    500.
+    """
+    roots = tuple(
+        r.model_copy(update={"fields": ()}) if r.root == "widget" else r
+        for r in registry.roots
+    )
+    scopeless = registry.model_copy(update={"roots": roots})
+    response = _client(scopeless, [ROUTE]).post(
+        "/translate", json={"question": "active widgets"}
+    )
+    assert response.status_code == 503
+
+
 def test_provider_failure_is_a_502(registry):
     response = _client(registry, [ProviderError("rate limited")]).post(
         "/translate", json={"question": "active widgets"}

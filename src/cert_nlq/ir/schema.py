@@ -23,6 +23,15 @@ _NO_JOIN = "__none__"
 #: independent of the registry — an aggregate is always a number.
 HAVING_OPS = ("=", "!=", ">", "<", ">=", "<=")
 
+class ScopeError(ValueError):
+    """A root offers no fields to translate against.
+
+    Subclasses ValueError so existing callers and tests are unaffected; it
+    exists so the HTTP layer can tell a registry-shaped failure apart from a
+    bug in this service.
+    """
+
+
 #: Levels of grouping the generated schema offers. Finite by construction —
 #: Group1 holds conditions only, GroupN holds conditions or Group(N-1) — so
 #: nothing is self-referential and no provider depth limit applies. Measured:
@@ -65,7 +74,7 @@ def build_payload_model(
 ) -> type[BaseModel]:
     scoped = fields_in_scope(root, groups, joins)
     if not scoped:
-        raise ValueError(f"no fields in scope for root {root.root!r}")
+        raise ScopeError(f"no fields in scope for root {root.root!r}")
 
     keys = tuple(f.key for f in scoped)
     ops = tuple(sorted({op for f in scoped for op in f.operators}))

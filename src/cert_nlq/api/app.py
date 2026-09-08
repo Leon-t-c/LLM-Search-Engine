@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from ..config import get_settings
+from ..ir.schema import ScopeError
 from ..registry.client import RegistryClient, RegistryUnavailable
 from ..translate.provider import Provider, ProviderError
 from ..translate.translator import translate
@@ -63,6 +64,17 @@ def create_app(registry_client, provider: Provider) -> FastAPI:
             raise HTTPException(
                 status_code=502,
                 detail="The translation provider is temporarily unavailable.",
+            ) from exc
+        except ScopeError as exc:
+            # A root that offers no fields to translate against is a
+            # registry problem, not a bug in this service — tell the two
+            # apart rather than letting this surface as an undifferentiated
+            # 500. Deliberately not a blanket `except Exception`: a real bug
+            # here should still 500 rather than claim to be retryable.
+            logger.exception("registry-shaped scope failure")
+            raise HTTPException(
+                status_code=503,
+                detail="The query service is temporarily unavailable.",
             ) from exc
         # `by_alias=True` is REQUIRED, not cosmetic. `Aggregate.alias` is
         # serialised as `as` (a Python keyword), and without the flag this

@@ -3,7 +3,12 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from cert_nlq.ir.schema import build_payload_model, fields_in_scope, json_schema_for
+from cert_nlq.ir.schema import (
+    ScopeError,
+    build_payload_model,
+    fields_in_scope,
+    json_schema_for,
+)
 
 
 def test_empty_groups_means_every_group(registry):
@@ -138,6 +143,14 @@ def test_an_unknown_group_still_leaves_the_identity_group_in_scope(registry):
 def test_a_genuinely_empty_slice_is_a_programming_error(registry):
     empty = registry.root("widget").model_copy(update={"fields": ()})
     with pytest.raises(ValueError, match="no fields in scope"):
+        build_payload_model(empty)
+
+
+def test_a_genuinely_empty_slice_raises_a_scope_error(registry):
+    """A distinct type, so the HTTP layer can tell this apart from a bug."""
+    empty = registry.root("widget").model_copy(update={"fields": ()})
+    assert issubclass(ScopeError, ValueError)
+    with pytest.raises(ScopeError):
         build_payload_model(empty)
 
 
