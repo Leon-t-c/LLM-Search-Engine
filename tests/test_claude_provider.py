@@ -8,7 +8,7 @@ from cert_nlq.translate.claude_provider import (
     FALLBACK_BETA,
     ClaudeProvider,
 )
-from cert_nlq.translate.provider import ProviderError
+from cert_nlq.translate.provider import USAGE_TOKEN_KEYS, ProviderError
 
 SCHEMA = {"type": "object", "properties": {"root": {"type": "string"}},
           "required": ["root"], "additionalProperties": False}
@@ -190,13 +190,24 @@ def test_usage_is_reported_to_the_callback():
     )
     assert seen == [{
         "schema_name": "Route", "model": DEFAULT_MODEL,
-        "prompt_tokens": 120, "completion_tokens": 8,
-        "cached_tokens": None, "cache_creation_tokens": None,
-        "reasoning_tokens": None,
+        "uncached_input_tokens": 120, "cached_input_tokens": 0,
+        "cache_write_tokens": 0, "output_tokens": 8,
+        "reasoning_tokens": 0,
     }]
 
 
-def test_the_cache_and_reasoning_counts_reach_the_record():
+def test_the_record_carries_exactly_the_shared_keys():
+    """Both adapters are summed on one set, so one key set, one meaning."""
+    seen = []
+    client, _, _ = _client(content=[_text({"root": "widget"})])
+    ClaudeProvider("key", client=client, on_usage=seen.append).complete(
+        "sys", "q", SCHEMA, "R"
+    )
+    assert set(seen[0]) == {"schema_name", "model", *USAGE_TOKEN_KEYS}
+
+
+def test_the_input_count_already_excludes_the_cached_reads():
+    """This vendor's counters sit beside each other; nothing is subtracted."""
     usage = SimpleNamespace(
         input_tokens=12,
         output_tokens=8,
@@ -209,8 +220,9 @@ def test_the_cache_and_reasoning_counts_reach_the_record():
     ClaudeProvider("key", client=client, on_usage=seen.append).complete(
         "sys", "q", SCHEMA, "R"
     )
-    assert seen[0]["cached_tokens"] == 900
-    assert seen[0]["cache_creation_tokens"] == 64
+    assert seen[0]["uncached_input_tokens"] == 12
+    assert seen[0]["cached_input_tokens"] == 900
+    assert seen[0]["cache_write_tokens"] == 64
     assert seen[0]["reasoning_tokens"] == 5
 
 

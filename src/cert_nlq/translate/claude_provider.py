@@ -6,7 +6,7 @@ contract, so nothing above the protocol knows which vendor is in use.
 import json
 import logging
 
-from .provider import ProviderError
+from .provider import ProviderError, token_count
 
 logger = logging.getLogger(__name__)
 
@@ -126,11 +126,12 @@ class ClaudeProvider:
     def _report_usage(self, response, schema_name: str) -> None:
         """Hand token counts to the caller. Never fail the call over this.
 
-        The keys match the other adapter's so a single log line prices either
-        one. Two differences are real, not naming: `prompt_tokens` here
-        excludes the cached reads rather than including them, and cache
-        *creation* is billed separately and has no counterpart on the other
-        side, so it gets its own key.
+        The keys are the shared, non-overlapping set — see USAGE_TOKEN_KEYS.
+        This vendor already reports that form: `input_tokens` excludes both
+        cache counters, which sit beside it rather than inside it. The other
+        vendor's input total includes its cached reads and is adjusted there.
+        That is what makes a single key summable across a golden set answered
+        by both adapters.
         """
         if self._on_usage is None:
             return
@@ -141,13 +142,13 @@ class ClaudeProvider:
         record = {
             "schema_name": schema_name,
             "model": self._model,
-            "prompt_tokens": getattr(usage, "input_tokens", None),
-            "completion_tokens": getattr(usage, "output_tokens", None),
-            "cached_tokens": getattr(usage, "cache_read_input_tokens", None),
-            "cache_creation_tokens": getattr(
-                usage, "cache_creation_input_tokens", None
+            "uncached_input_tokens": token_count(usage, "input_tokens"),
+            "cached_input_tokens": token_count(usage, "cache_read_input_tokens"),
+            "cache_write_tokens": token_count(
+                usage, "cache_creation_input_tokens"
             ),
-            "reasoning_tokens": getattr(output_detail, "thinking_tokens", None),
+            "output_tokens": token_count(usage, "output_tokens"),
+            "reasoning_tokens": token_count(output_detail, "thinking_tokens"),
         }
         try:
             self._on_usage(record)

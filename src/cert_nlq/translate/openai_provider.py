@@ -12,7 +12,7 @@ import json
 import logging
 import re
 
-from .provider import ProviderError
+from .provider import ProviderError, token_count
 from .router import ROUTE_SCHEMA_NAME
 
 logger = logging.getLogger(__name__)
@@ -143,25 +143,37 @@ class OpenAIProvider:
             raise ProviderError("model output was not valid JSON") from exc
 
     def _report_usage(self, completion, model: str, schema_name: str) -> None:
-        """Hand token counts to the caller. Never fail the call over this."""
+        """Hand token counts to the caller. Never fail the call over this.
+
+        The keys are the shared, non-overlapping set — see USAGE_TOKEN_KEYS.
+        This vendor's `prompt_tokens` is a total that *includes* the cached
+        reads, while the other vendor reports the two side by side, so the
+        cached count is subtracted back out here. That is what makes a single
+        key summable across a golden set answered by both adapters.
+        """
         if self._on_usage is None:
             return
         usage = getattr(completion, "usage", None)
         if usage is None:
             return
-        # `prompt_tokens` is inclusive of the cached ones, which bill at a
-        # discount, so the plain pair cannot price a call. Both detail
-        # objects are optional on the response and each field inside them
-        # is too, hence the layered getattr.
+        # Both detail objects are optional on the response and each field
+        # inside them is too, hence reading through a possibly-None object.
         prompt_detail = getattr(usage, "prompt_tokens_details", None)
         output_detail = getattr(usage, "completion_tokens_details", None)
+        cached = token_count(prompt_detail, "cached_tokens")
         record = {
             "schema_name": schema_name,
             "model": model,
-            "prompt_tokens": getattr(usage, "prompt_tokens", None),
-            "completion_tokens": getattr(usage, "completion_tokens", None),
-            "cached_tokens": getattr(prompt_detail, "cached_tokens", None),
-            "reasoning_tokens": getattr(output_detail, "reasoning_tokens", None),
+            # Clamped at zero: a breakdown that ever came back larger than
+            # the total it belongs to would otherwise make the sum negative,
+            # which is worse than a slightly wrong split.
+            "uncached_input_tokens": max(
+                token_count(usage, "prompt_tokens") - cached, 0
+            ),
+            "cached_input_tokens": cached,
+            "cache_write_tokens": token_count(prompt_detail, "cache_write_tokens"),
+            "output_tokens": token_count(usage, "completion_tokens"),
+            "reasoning_tokens": token_count(output_detail, "reasoning_tokens"),
         }
         try:
             self._on_usage(record)

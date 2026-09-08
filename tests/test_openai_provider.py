@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from cert_nlq.translate.openai_provider import OpenAIProvider
-from cert_nlq.translate.provider import ProviderError
+from cert_nlq.translate.provider import USAGE_TOKEN_KEYS, ProviderError
 
 SCHEMA = {"type": "object", "properties": {"root": {"type": "string"}},
           "required": ["root"], "additionalProperties": False}
@@ -115,14 +115,25 @@ def test_without_a_router_model_both_stages_use_one_model():
 
 
 def test_usage_is_reported_to_the_callback():
-    """Token accounting is the cost control and the phase-2 baseline."""
+    """Token accounting is the cost control and the later baseline."""
     seen = []
     client, _ = _client(content=json.dumps({"root": "widget"}))
     provider = OpenAIProvider("key", "m", client=client, on_usage=seen.append)
     provider.complete("sys", "q", SCHEMA, "Route")
     assert seen == [{"schema_name": "Route", "model": "m",
-                     "prompt_tokens": 120, "completion_tokens": 8,
-                     "cached_tokens": None, "reasoning_tokens": None}]
+                     "uncached_input_tokens": 120, "cached_input_tokens": 0,
+                     "cache_write_tokens": 0, "output_tokens": 8,
+                     "reasoning_tokens": 0}]
+
+
+def test_the_record_carries_exactly_the_shared_keys():
+    """Both adapters are summed on one set, so one key set, one meaning."""
+    seen = []
+    client, _ = _client(content=json.dumps({"root": "widget"}))
+    OpenAIProvider("key", "m", client=client, on_usage=seen.append).complete(
+        "sys", "q", SCHEMA, "R"
+    )
+    assert set(seen[0]) == {"schema_name", "model", *USAGE_TOKEN_KEYS}
 
 
 def test_a_missing_usage_field_does_not_break_the_call():
@@ -195,12 +206,18 @@ def test_a_truncated_response_names_the_cap_not_the_json():
     assert "JSON" not in message
 
 
-def test_cached_and_reasoning_counts_reach_the_record():
-    """`prompt_tokens` includes cached tokens, which bill differently."""
+def test_the_cached_count_is_taken_out_of_the_input_total():
+    """This vendor's prompt total includes the cached reads.
+
+    The other vendor's does not, so reporting the raw total would make the
+    two adapters' input counts mean different things and stop them summing.
+    """
     usage = SimpleNamespace(
         prompt_tokens=120,
         completion_tokens=8,
-        prompt_tokens_details=SimpleNamespace(cached_tokens=64),
+        prompt_tokens_details=SimpleNamespace(
+            cached_tokens=64, cache_write_tokens=16
+        ),
         completion_tokens_details=SimpleNamespace(reasoning_tokens=5),
     )
     seen = []
@@ -208,8 +225,27 @@ def test_cached_and_reasoning_counts_reach_the_record():
     OpenAIProvider("key", "m", client=client, on_usage=seen.append).complete(
         "sys", "q", SCHEMA, "R"
     )
-    assert seen[0]["cached_tokens"] == 64
+    assert seen[0]["uncached_input_tokens"] == 56
+    assert seen[0]["cached_input_tokens"] == 64
+    assert (
+        seen[0]["uncached_input_tokens"] + seen[0]["cached_input_tokens"] == 120
+    )
+    assert seen[0]["cache_write_tokens"] == 16
     assert seen[0]["reasoning_tokens"] == 5
+
+
+def test_the_input_count_never_goes_negative():
+    """A breakdown larger than the total it came from must not underflow."""
+    usage = SimpleNamespace(
+        prompt_tokens=10, completion_tokens=8,
+        prompt_tokens_details=SimpleNamespace(cached_tokens=99),
+    )
+    seen = []
+    client, _ = _client(content=json.dumps({"root": "widget"}), usage=usage)
+    OpenAIProvider("key", "m", client=client, on_usage=seen.append).complete(
+        "sys", "q", SCHEMA, "R"
+    )
+    assert seen[0]["uncached_input_tokens"] == 0
 
 
 def test_absent_detail_blocks_do_not_break_the_call():
@@ -222,8 +258,10 @@ def test_absent_detail_blocks_do_not_break_the_call():
     client, _ = _client(content=json.dumps({"root": "widget"}), usage=usage)
     provider = OpenAIProvider("key", "m", client=client, on_usage=seen.append)
     assert provider.complete("sys", "q", SCHEMA, "R") == {"root": "widget"}
-    assert seen[0]["cached_tokens"] is None
-    assert seen[0]["reasoning_tokens"] is None
+    assert seen[0]["cached_input_tokens"] == 0
+    assert seen[0]["cache_write_tokens"] == 0
+    assert seen[0]["reasoning_tokens"] == 0
+    assert seen[0]["uncached_input_tokens"] == 120
 
 
 def test_the_format_name_is_sanitised():
