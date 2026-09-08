@@ -26,6 +26,8 @@ TRANSLATOR_SYSTEM = (
     "Conditions form a tree of AND/OR groups, nested as deep as the shape "
     "offers. Nest a group only when the question genuinely needs mixed logic, "
     "such as (A or B) and C; keep it flat otherwise.\n"
+    "Prefer the `in` operator over a group when one field takes several "
+    "values: `status in [A, B]` rather than a group of two equalities.\n"
     "For a value from a coded field, write the meaning in plain words; a later "
     "step maps it to the stored code. Do not guess a code.\n"
     "Leave a name or address exactly as written, placeholders included.\n"

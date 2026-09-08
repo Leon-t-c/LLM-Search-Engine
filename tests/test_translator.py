@@ -3,9 +3,18 @@ import pytest
 from cert_nlq.ir.payload import iter_conditions
 from cert_nlq.translate.provider import FakeProvider, ProviderError
 from cert_nlq.translate.refusals import RefusalReason
-from cert_nlq.translate.translator import translate
+from cert_nlq.translate.translator import TRANSLATOR_SYSTEM, translate
 
 ROUTE = {"root": "widget", "joins": [], "groups": ["Lifecycle"]}
+
+
+def test_the_prompt_offers_in_as_the_flat_alternative():
+    """A same-field disjunction has a flat form; the prompt must say so.
+
+    Prompt text is the input to everything this project measures, and no
+    behavioural test reaches it. This is a tripwire, not a proof.
+    """
+    assert "`in`" in TRANSLATOR_SYSTEM
 
 
 def test_a_clean_question_produces_ok(registry):
