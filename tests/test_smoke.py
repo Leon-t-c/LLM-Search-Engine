@@ -10,8 +10,8 @@ def test_package_imports_and_reports_a_version():
 def test_no_secret_shaped_strings_are_committed():
     """A credential in the tree is a release blocker, so it fails the suite.
 
-    This repo's history previously contained a committed OpenAI key. The point
-    of this test is that the next one fails CI instead of reaching a remote.
+    Secrets belong in the environment. This is the backstop that stops one
+    reaching a remote, where rotation is the only remedy left.
     """
     tracked = subprocess.run(
         ["git", "ls-files"], capture_output=True, text=True, check=True

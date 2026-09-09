@@ -159,7 +159,7 @@ def test_group_by_must_be_a_known_field(registry):
 
 
 def test_iequals_is_accepted_where_the_registry_offers_it(registry):
-    """Case-insensitive equality for dirty coded columns on a case-inconsistent column.
+    """An operator the registry offers needs no support in this module.
 
     The translator treats operators as opaque registry strings, so `iequals`
     needs no special handling here — this test exists to prove that, and to

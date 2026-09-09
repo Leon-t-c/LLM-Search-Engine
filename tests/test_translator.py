@@ -394,3 +394,52 @@ def test_a_payload_for_another_root_is_not_accepted(registry):
     assert response.status == "refused"
     assert "vendor" in response.detail and "widget" in response.detail
     assert len(provider.calls) == 3, "the wrong root should still get its one retry"
+
+
+def _routed_with_shipment(payload_dict):
+    """Run one translation where stage 1 chose a join the payload may not use."""
+    return FakeProvider([
+        {"root": "widget", "joins": ["shipment"], "groups": ["Lifecycle", "Commercial"]},
+        payload_dict,
+    ])
+
+
+def test_a_join_nobody_referenced_is_not_added(registry):
+    """Stage 1 may over-select a slice. It must not over-select a join.
+
+    An over-broad slice costs nothing: it only widens what the schema offers.
+    A join changes the rows. Attaching a one-to-many table that no slot
+    references multiplies the root's rows, so a count returns the number of
+    related records instead of the number of things asked about — and the
+    answer looks entirely right.
+    """
+    only_widget = {"root": "widget",
+                   "where": {"combinator": "AND", "children": [
+                       {"field": "widget.status", "op": "=", "value": "Active"}]},
+                   "aggregate": [{"fn": "count", "field": "*", "as": "total"}]}
+    response = translate(
+        "how many active widgets", registry,
+        _routed_with_shipment(only_widget), now_year=2026,
+    )
+
+    assert response.status == "ok"
+    assert response.payload.join == (), "an unreferenced join must not be attached"
+
+
+def test_a_join_the_payload_uses_is_still_restated(registry):
+    """The router's decision is carried when a field actually needs it.
+
+    Nothing asks the model to repeat the join, so a payload using a joined
+    field without naming it is not a model error — failing it would spend the
+    one retry and then refuse with a reason that is untrue.
+    """
+    uses_shipment = {"root": "widget",
+                     "where": {"combinator": "AND", "children": [
+                         {"field": "shipment.amount", "op": ">", "value": 100}]}}
+    response = translate(
+        "widgets with big shipments", registry,
+        _routed_with_shipment(uses_shipment), now_year=2026,
+    )
+
+    assert response.status == "ok"
+    assert response.payload.join == ("shipment",)

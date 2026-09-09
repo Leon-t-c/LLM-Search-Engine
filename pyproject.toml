@@ -26,6 +26,12 @@ where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+# Report skip reasons. Two contract tests import private normalisers from the
+# provider SDKs on purpose; both SDKs are hard dependencies, so a skip there
+# can only mean the path moved -- i.e. the vendor changed what it accepts and
+# nothing is checking that claim any more. A silent skip count is exactly how
+# that goes unnoticed.
+addopts = ["-rs"]
 
 [tool.ruff]
 # Pinned, not inherited. With no section here the rule set is whatever the

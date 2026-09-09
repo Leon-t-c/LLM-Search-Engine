@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 
 from pydantic import ValidationError
 
-from ..ir.payload import Condition, Group, Payload
+from ..ir.payload import Condition, Group, Payload, iter_conditions
 from ..ir.response import (
     Candidate,
     NeedsClarification,
@@ -201,6 +201,14 @@ def _with_router_joins(payload: Payload, chosen: Route) -> Payload:
     error. Failing it wastes the one retry and then refuses with a reason that
     is untrue: the field is in the schema.
 
+    Only tables the payload actually references are added. Stage 1 is meant to
+    be allowed to over-select — an over-broad *slice* costs nothing, because
+    it only widens what the schema offers. A join is different: it changes the
+    rows. Adding a one-to-many table nothing references multiplies the root's
+    rows, so a count returns the number of related records instead of the
+    number of things asked about — a wrong answer that looks entirely right.
+    Restating a decision is safe; acting on one nobody used is not.
+
     Union rather than overwrite, so a join the model added is kept and still
     checked against the registry, and the router's are appended in its own
     order — nothing here depends on iteration order.
@@ -211,10 +219,32 @@ def _with_router_joins(payload: Payload, chosen: Route) -> Payload:
     """
     if payload.root != chosen.root:
         return payload
-    extra = tuple(t for t in chosen.joins if t not in payload.join)
+    used = _tables_referenced(payload)
+    extra = tuple(
+        t for t in chosen.joins if t in used and t not in payload.join
+    )
     if not extra:
         return payload
     return payload.model_copy(update={"join": payload.join + extra})
+
+
+def _tables_referenced(payload: Payload) -> set[str]:
+    """Every table named by a field key anywhere in the payload.
+
+    Keys are `table.column`, so the prefix is the table. Read from every slot
+    that can carry a field, not just the conditions: a joined column can be
+    selected, grouped by, aggregated or sorted on without ever appearing in a
+    filter.
+
+    `having` is not read here: it references an aggregate by alias, and that
+    aggregate's own field is already counted.
+    """
+    keys = [c.field for c in iter_conditions(payload.where)]
+    keys += list(payload.columns) + list(payload.group_by)
+    keys += [a.field for a in payload.aggregate]
+    if payload.sort is not None and payload.sort.field:
+        keys.append(payload.sort.field)
+    return {key.split(".", 1)[0] for key in keys if "." in key}
 
 
 def _without_field(node, key: str):
