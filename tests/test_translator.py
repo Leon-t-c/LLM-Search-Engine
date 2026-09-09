@@ -186,18 +186,39 @@ def test_the_routers_joins_are_carried_into_the_payload(registry):
     assert response.payload.join == ("shipment",)
 
 
-def test_a_join_the_model_supplied_survives_the_seeding(registry):
-    """Seeding is a union: the model's own join is kept and still checked."""
+def test_a_join_the_model_supplied_and_used_is_kept(registry):
+    """A join the model named itself survives when a field actually uses it."""
     provider = FakeProvider([
-        {"root": "widget", "joins": ["shipment"], "groups": ["Commercial"]},
+        {"root": "widget", "joins": [], "groups": ["Commercial"]},
+        {"root": "widget", "join": ["shipment"],
+         "where": {"combinator": "AND",
+          "children": [{"field": "shipment.amount", "op": ">", "value": 500}]}},
+    ])
+    response = translate("widgets shipped for over 500", registry, provider, now_year=2026)
+
+    assert response.status == "ok"
+    assert response.payload.join == ("shipment",)
+
+
+def test_a_join_the_model_supplied_but_never_used_is_dropped(registry):
+    """The rule does not care who proposed the join, only whether it is used.
+
+    An unreferenced join is the same wrong answer whether the router put it
+    there or the model did: joining a one-to-many table nothing selects from
+    multiplies the rows. Dropped rather than failed, because the payload's
+    meaning was never in doubt and failing it would spend the one retry.
+    """
+    provider = FakeProvider([
+        {"root": "widget", "joins": [], "groups": ["Commercial"]},
         {"root": "widget", "join": ["vendor", "shipment"],
          "where": {"combinator": "AND",
           "children": [{"field": "shipment.amount", "op": ">", "value": 500}]}},
     ])
     response = translate("widgets shipped for over 500", registry, provider, now_year=2026)
-    assert response.status == "ok"
-    assert response.payload.join == ("vendor", "shipment")
 
+    assert response.status == "ok"
+    assert response.payload.join == ("shipment",), "vendor is named by no field"
+    assert len(provider.calls) == 2, "dropping it must not cost the retry"
 
 def test_a_join_shaped_failure_does_not_ask_for_a_different_field(registry):
     """"Pick another field" is the opposite of the fix when the field is fine."""
@@ -443,3 +464,36 @@ def test_a_join_the_payload_uses_is_still_restated(registry):
 
     assert response.status == "ok"
     assert response.payload.join == ("shipment",)
+
+
+def test_a_clarification_drops_a_join_its_pruning_orphaned(registry):
+    """Pruning a condition can strand the join only that condition needed.
+
+    The payload handed back is a seed for the caller's builder, so a join
+    left in it is a claim that something still uses it. Nothing does.
+
+    Needs a coded field on the joined table, which the fixture has no reason
+    to carry, so one is added here.
+    """
+    widget = registry.root("widget")
+    coded = widget.fields_by_key["widget.status"].model_copy(update={
+        "key": "shipment.state", "column": "state", "table": "shipment",
+        "label": "Shipment State", "group": "Commercial",
+    })
+    patched = registry.model_copy(update={"roots": (
+        widget.model_copy(update={"fields": (*widget.fields, coded)}),
+        *(r for r in registry.roots if r.root != "widget"),
+    )})
+
+    provider = FakeProvider([
+        {"root": "widget", "joins": ["shipment"],
+         "groups": ["Lifecycle", "Commercial"]},
+        {"root": "widget", "join": ["shipment"],
+         "where": {"combinator": "AND", "children": [
+             {"field": "widget.status", "op": "=", "value": "Active"},
+             {"field": "shipment.state", "op": "=", "value": "in limbo"}]}},
+    ])
+    response = translate("active widgets in limbo", patched, provider, now_year=2026)
+
+    assert response.status == "needs_clarification"
+    assert response.payload.join == (), "the only shipment field was pruned"

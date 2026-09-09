@@ -71,8 +71,9 @@ def resolve_vocabulary(spec: FieldSpec, raw) -> str | None:
 def resolve_relative_year(raw, now_year: int) -> int | None:
     """Resolve a year phrase from the calendar, never from MAX(year).
 
-    The stored year column is known to hold impossible values, so anything
-    derived from the data's maximum is poisoned.
+    A stored maximum is a fact about the rows, not about the calendar. A
+    question asking for "this year" means the calendar, so that is what it
+    is answered from.
     """
     text = str(raw).strip().casefold()
     if text in _RELATIVE_YEARS:

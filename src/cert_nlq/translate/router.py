@@ -109,11 +109,11 @@ def route(question: str, registry: Registry, provider: Provider) -> Route:
     A hallucinated join or group is dropped rather than refused: an over-broad
     slice still answers the question, while refusing would not.
 
-    That tolerance holds because a routed join is only ever *offered* here. It
-    reaches the compiled query solely if some field in the answer actually
-    comes from that table — see `_tables_referenced`. Widening what the schema
-    offers is free; widening what is joined is not, because a join changes
-    which rows come back.
+    That tolerance holds because nothing here attaches a join: a routed join
+    is only ever *offered*. The translator decides what is actually joined,
+    and joins a table only when a field in the answer comes from it — see
+    `_reconcile_joins`. Widening what the schema offers is free; widening
+    what is joined is not, because a join changes which rows come back.
     """
     raw = provider.complete(
         system=f"{ROUTER_SYSTEM}\n\nAvailable entities:\n{_describe(registry)}",

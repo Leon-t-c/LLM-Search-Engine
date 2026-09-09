@@ -51,7 +51,7 @@ def test_the_claude_fallback_is_off_unless_asked_for(monkeypatch):
 
 
 def test_the_claude_fallback_can_be_turned_on(monkeypatch):
-    """Wave A removed the rescue from production; this is the way back."""
+    """Off by default, but a deploy that wants the rescue can have it."""
     monkeypatch.setenv("CERT_NLQ_CLAUDE_FALLBACKS", "true")
     assert Settings(_env_file=None).claude_fallbacks is True
 

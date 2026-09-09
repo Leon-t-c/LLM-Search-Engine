@@ -113,7 +113,8 @@ def _translate_stage_two(
         try:
             proposed = Payload.model_validate(_normalise(raw))
             return validate_payload(
-                _with_router_joins(proposed, chosen), registry, expected_root=root.root
+                _reconcile_joins(proposed, chosen, root), registry,
+                expected_root=root.root,
             ), ""
         except (PayloadError, ValidationError) as exc:
             problem = str(exc)
@@ -192,8 +193,8 @@ def _normalise(raw):
     return out
 
 
-def _with_router_joins(payload: Payload, chosen: Route) -> Payload:
-    """Restate on the payload the joins stage 1 already chose.
+def _reconcile_joins(payload: Payload, chosen: Route, root: RootSpec) -> Payload:
+    """Join exactly the tables the payload's own fields come from.
 
     The router decides which tables the question needs and the schema then
     offers their fields, but nothing asks the model to repeat that decision —
@@ -201,50 +202,76 @@ def _with_router_joins(payload: Payload, chosen: Route) -> Payload:
     error. Failing it wastes the one retry and then refuses with a reason that
     is untrue: the field is in the schema.
 
-    Only tables the payload actually references are added. Stage 1 is meant to
-    be allowed to over-select — an over-broad *slice* costs nothing, because
-    it only widens what the schema offers. A join is different: it changes the
-    rows. Adding a one-to-many table nothing references multiplies the root's
-    rows, so a count returns the number of related records instead of the
-    number of things asked about — a wrong answer that looks entirely right.
-    Restating a decision is safe; acting on one nobody used is not.
+    The rule both ways is the same: a table is joined exactly when some field
+    in the payload comes from it. Stage 1 is meant to be free to over-select —
+    an over-broad *slice* costs nothing, because it only widens what the
+    schema offers. A join is different: it changes the rows. Attaching a
+    one-to-many table nothing references multiplies the root's rows, so a
+    count returns the number of related records instead of the number of
+    things asked about — a wrong answer that looks entirely right.
 
-    Union rather than overwrite, so a join the model added is kept and still
-    checked against the registry, and the router's are appended in its own
-    order — nothing here depends on iteration order.
+    So an unreferenced join is dropped whoever proposed it, the router or the
+    model. The alternative was to fail it, which spends the one retry on a
+    payload whose meaning was never in doubt.
 
-    Left alone when the model ignored the schema's single-valued `root`: the
-    router's joins belong to another entity then, and adding them would
-    replace one honest failure with a confusing one.
+    A join the model named *and* used is kept in its own order, and the
+    router's are appended after — nothing here depends on iteration order.
+
+    Left alone entirely when the model ignored the schema's single-valued
+    `root`: the router's joins belong to another entity then, and touching
+    the list would replace one honest failure with a confusing one.
     """
     if payload.root != chosen.root:
         return payload
-    used = _tables_referenced(payload)
-    extra = tuple(
-        t for t in chosen.joins if t in used and t not in payload.join
+    used = _tables_referenced(payload, root)
+    kept = tuple(t for t in payload.join if t in used)
+    kept += tuple(t for t in chosen.joins if t in used and t not in kept)
+    return _with_joins(payload, kept)
+
+
+def _with_joins(payload: Payload, joins: tuple[str, ...]) -> Payload:
+    """`payload` with `joins`, or `payload` itself when nothing changed."""
+    return payload if joins == payload.join else payload.model_copy(
+        update={"join": joins}
     )
-    if not extra:
-        return payload
-    return payload.model_copy(update={"join": payload.join + extra})
 
 
-def _tables_referenced(payload: Payload) -> set[str]:
-    """Every table named by a field key anywhere in the payload.
+def _drop_unused_joins(payload: Payload, root: RootSpec) -> Payload:
+    """Drop joins left orphaned after conditions were pruned from the payload.
 
-    Keys are `table.column`, so the prefix is the table. Read from every slot
-    that can carry a field, not just the conditions: a joined column can be
-    selected, grouped by, aggregated or sorted on without ever appearing in a
-    filter.
+    Pruning is subtractive, so it can strand the join that only the pruned
+    condition needed. The same rule applies as when the join was attached: a
+    table is joined when a field comes from it, and this payload is handed
+    back for the caller to build on.
+    """
+    used = _tables_referenced(payload, root)
+    return _with_joins(payload, tuple(t for t in payload.join if t in used))
 
-    `having` is not read here: it references an aggregate by alias, and that
-    aggregate's own field is already counted.
+
+def _tables_referenced(payload: Payload, root: RootSpec) -> set[str]:
+    """Every table owning a field the payload names.
+
+    The table comes from the registry's own `table`, never from the shape of
+    the key. Keys are opaque here — the registry carries `table` and `column`
+    separately precisely so this service works whether or not keys happen to
+    be table-qualified, and splitting on a dot would quietly break that and
+    disagree with how validation decides the same question.
+
+    Read from every slot that can carry a field, not just the conditions: a
+    joined column can be selected, grouped by, aggregated or sorted on without
+    ever appearing in a filter. `having` is not read, because it names an
+    aggregate by alias and that aggregate's own field is already counted.
+
+    A key the registry does not know is ignored; validation rejects it, and
+    with a better message than anything guessable from here.
     """
     keys = [c.field for c in iter_conditions(payload.where)]
     keys += list(payload.columns) + list(payload.group_by)
     keys += [a.field for a in payload.aggregate]
     if payload.sort is not None and payload.sort.field:
         keys.append(payload.sort.field)
-    return {key.split(".", 1)[0] for key in keys if "." in key}
+    by_key = root.fields_by_key
+    return {by_key[key].table for key in keys if key in by_key}
 
 
 def _without_field(node, key: str):
@@ -322,7 +349,9 @@ def _clarify(
         for entry in vocabulary
     )
     return NeedsClarification(
-        payload=payload.model_copy(update={"where": _as_group(kept)}),
+        payload=_drop_unused_joins(
+            payload.model_copy(update={"where": _as_group(kept)}), root
+        ),
         unresolved=Unresolved(
             phrase=phrase,
             question=f"Which {spec.label} did you mean by {phrase!r}?",

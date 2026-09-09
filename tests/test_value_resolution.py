@@ -36,7 +36,7 @@ def test_vocabulary_is_none_for_a_field_without_one(registry):
 
 
 def test_relative_year_uses_the_calendar_year_not_the_data():
-    """The stored year column is untrustworthy; never derive 'latest' from it."""
+    """"This year" is a fact about the calendar, not about the stored rows."""
     assert resolve_relative_year("this year", 2026) == 2026
     assert resolve_relative_year("last year", 2026) == 2025
     assert resolve_relative_year("this tax year", 2026) == 2026

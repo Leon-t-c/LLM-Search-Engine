@@ -89,8 +89,8 @@ def test_a_joined_field_with_the_join_is_accepted(registry):
 
 
 def test_unenumerated_join_is_rejected(registry):
-    with pytest.raises(PayloadError, match="join 'court' is not available"):
-        validate_payload(_ok(join=["court"]), registry)
+    with pytest.raises(PayloadError, match="join 'cogwheel' is not available"):
+        validate_payload(_ok(join=["cogwheel"]), registry)
 
 
 def test_sum_over_a_text_field_is_rejected(registry):
@@ -188,7 +188,7 @@ def test_a_payload_with_no_conditions_and_no_aggregate_is_rejected(registry):
 
 def test_all_problems_are_reported_together(registry):
     with pytest.raises(PayloadError) as exc:
-        validate_payload(_ok(join=["court"], columns=["widget.nope"]), registry)
+        validate_payload(_ok(join=["cogwheel"], columns=["widget.nope"]), registry)
     assert len(exc.value.problems) == 2
 
 

@@ -73,7 +73,7 @@ def test_route_rejects_an_unknown_root(registry):
 def test_route_drops_a_join_not_available_on_the_root(registry):
     """A hallucinated join is dropped, not refused — the query still runs."""
     provider = FakeProvider([
-        {"root": "widget", "joins": ["shipment", "court"], "groups": []}
+        {"root": "widget", "joins": ["shipment", "cogwheel"], "groups": []}
     ])
     assert route("anything", registry, provider).joins == ("shipment",)
 
