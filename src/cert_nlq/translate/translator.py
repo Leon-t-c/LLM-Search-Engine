@@ -1,5 +1,5 @@
 """Stage 2 plus orchestration: question in, one of three responses out."""
-from datetime import date
+from datetime import UTC, datetime
 
 from pydantic import ValidationError
 
@@ -74,10 +74,22 @@ def translate(
     if payload is None:
         return Refused(reason=RefusalReason.FIELD_NOT_IN_SCHEMA, detail=problem)
 
-    resolved, unresolved = resolve_values(payload, root, now_year or date.today().year)
+    resolved, unresolved = resolve_values(payload, root, now_year or _this_year())
     if unresolved:
         return _clarify(resolved, root, unresolved, registry.version)
     return Ok(payload=resolved, registry_version=registry.version)
+
+
+def _this_year() -> int:
+    """The fallback for a caller that did not say what year it is.
+
+    UTC rather than the server's local date. "This year" resolved off a local
+    clock gives two callers in different zones different answers for a few
+    hours around every new year, and which answer you get depends on where
+    the process happens to be deployed. A caller who cares sends `now_year`;
+    a caller who does not gets one answer, the same everywhere.
+    """
+    return datetime.now(UTC).year
 
 
 def _translate_stage_two(

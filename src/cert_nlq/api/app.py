@@ -27,12 +27,12 @@ usage_log = logging.getLogger("cert_nlq.usage")
 
 class TranslateRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
-    # "The current year as the caller sees it." Unbounded, an out-of-range
-    # value (negative, or absurdly large) does not fail: it threads through
-    # relative-year resolution and comes back as a resolved value in an
-    # otherwise-ok payload, silently, with no error and no clarification. A
-    # clock could plausibly produce a value in this window; nothing else
-    # should reach here.
+    # "The current year as the caller sees it." Bounded here because nothing
+    # downstream would object: an absurd year threads through relative-year
+    # resolution and comes back as a resolved value in an otherwise-ok
+    # payload, with no error and no clarification to show for it. The window
+    # is what a real clock could plausibly report; anything outside it is a
+    # caller bug, and it should fail here where the message can say so.
     now_year: int | None = Field(default=None, ge=2000, le=2100)
 
     @field_validator("question")

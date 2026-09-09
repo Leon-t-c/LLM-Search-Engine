@@ -139,7 +139,7 @@ def _resolve_node(node, by_key: dict, now_year: int, unresolved: list[Unresolvab
         parts = [_resolve_one(spec, v, now_year) for v in node.value]
         unresolved.extend(
             Unresolvable(field=node.field, op="in", value=raw)
-            for raw, (_, ok) in zip(node.value, parts) if not ok
+            for raw, (_, ok) in zip(node.value, parts, strict=True) if not ok
         )
         if all(ok for _, ok in parts):
             return node.model_copy(update={"value": tuple(v for v, _ in parts)})

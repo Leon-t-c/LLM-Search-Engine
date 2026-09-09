@@ -26,3 +26,27 @@ where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+
+[tool.ruff]
+# Pinned, not inherited. With no section here the rule set is whatever the
+# installed ruff happens to default to, and that default moves between
+# releases — so the same code lints clean on one machine and fails on
+# another, and CI has no stable definition of "clean" at all.
+target-version = "py313"
+# The code is written to wrap at 88. This is the hard limit rather than that
+# target: a handful of lines already sit just over it, and reflowing them to
+# satisfy a newly-pinned rule would be churn in a diff about lint config.
+line-length = 96
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # import ordering
+    "B",    # likely bugs
+    "C4",   # comprehensions
+    "UP",   # syntax this Python version supersedes
+    "DTZ",  # naive datetimes — a server-local "today" is not every caller's
+    "RUF",
+]

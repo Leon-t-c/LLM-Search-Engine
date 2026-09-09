@@ -222,7 +222,7 @@ def test_every_slot_says_requires_join_not_unknown(registry, slot, extra):
 
 def test_a_genuinely_absent_field_still_says_unknown(registry):
     """The counterpart: don't turn every miss into a join suggestion."""
-    with pytest.raises(PayloadError, match="unknown column 'nosuch.field'"):
+    with pytest.raises(PayloadError, match=r"unknown column 'nosuch\.field'"):
         validate_payload(_ok(columns=["nosuch.field"]), registry)
 
 

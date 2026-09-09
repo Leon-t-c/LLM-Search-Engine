@@ -4,7 +4,8 @@ Structural shape only. Whether a field exists, and whether an operator is
 legal for it, is decided against the registry in `validate.py` — these models
 cannot know, because the vocabulary arrives at runtime.
 """
-from typing import Iterator, Literal, Union
+from collections.abc import Iterator
+from typing import Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -49,10 +50,17 @@ class Group(BaseModel):
         return self
 
 
-def iter_conditions(node: Union[Condition, Group, None]) -> Iterator[Condition]:
-    """Every leaf condition, in order. The single traversal all consumers use.
+def iter_conditions(node: Condition | Group | None) -> Iterator[Condition]:
+    """Every leaf condition, in order. The single traversal for *reading* them.
 
-    Two independent tree walks is two places to get depth or ordering wrong.
+    Anything that needs to look at the leaves comes through here, so there is
+    one place ordering can be got wrong rather than several.
+
+    Rewrites do not, and cannot: pruning a field, resolving values and
+    measuring depth each rebuild the tree or count the levels as they go,
+    which is a different shape of walk from yielding leaves. They recurse
+    separately on purpose. Read that as three walks that must agree about
+    structure, not as three that could have been this one.
     """
     if node is None:
         return

@@ -9,7 +9,8 @@ a text operator, and that combination is what validation, not the schema,
 rejects.
 """
 import json
-from typing import Literal, Sequence, Union
+from collections.abc import Sequence
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
@@ -111,7 +112,7 @@ def build_payload_model(
             __config__=ConfigDict(frozen=True),
             combinator=(Literal["AND", "OR"], ...),
             children=(
-                tuple[condition if level == 1 else Union[condition, node], ...],
+                tuple[condition if level == 1 else condition | node, ...],
                 ...,
             ),
         )
@@ -121,7 +122,7 @@ def build_payload_model(
         f"{title}Aggregate",
         __config__=ConfigDict(frozen=True, populate_by_name=True),
         fn=(Literal["count", "sum", "avg", "min", "max"], ...),
-        field=(Literal[keys + ("*",)], ...),
+        field=(Literal[(*keys, "*")], ...),
         alias=(str, Field(alias="as")),
     )
     # `sort.field` and `having.op` are narrowed by subclassing rather than

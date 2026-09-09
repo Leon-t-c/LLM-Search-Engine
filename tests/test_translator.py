@@ -345,3 +345,31 @@ def test_a_failure_of_another_kind_still_gets_the_general_hint(registry):
 
     error = PayloadError(["unknown field 'widget.invented'"])
     assert PROBLEM_UNJOINED not in error.kinds
+
+
+def test_this_year_is_utc_not_the_server_s_local_date():
+    """Two callers in different zones must get the same answer to "this year".
+
+    A local `today()` disagrees with itself for a few hours around every new
+    year, and which answer a caller gets depends on where the process happens
+    to run — invisible in a test suite, and wrong in exactly the window where
+    a year filter matters most.
+    """
+    from datetime import UTC, datetime
+
+    from cert_nlq.translate.translator import _this_year
+
+    assert _this_year() == datetime.now(UTC).year
+
+
+def test_an_explicit_now_year_still_wins(registry):
+    """The fallback is for callers that did not say; it must not override."""
+    from cert_nlq.translate.provider import FakeProvider
+
+    provider = FakeProvider([
+        ROUTE,
+        {"root": "widget", "where": {"combinator": "AND",
+          "children": [{"field": "widget.year", "op": "=", "value": "this year"}]}},
+    ])
+    response = translate("widgets from this year", registry, provider, now_year=1999)
+    assert next(iter(iter_conditions(response.payload.where))).value == 1999

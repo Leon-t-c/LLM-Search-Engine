@@ -1,4 +1,3 @@
-import json
 
 import pytest
 from pydantic import ValidationError
@@ -160,7 +159,7 @@ def test_in_values_resolve_elementwise(registry):
     p = Payload.model_validate({"root": "widget", "where": {"combinator": "AND", "children": [
         {"field": "widget.status", "op": "in", "value": ["retired", "in service"]}]}})
     out, unresolved = resolve_values(p, registry.root("widget"), now_year=2026)
-    assert list(iter_conditions(out.where))[0].value == ("X", "A")
+    assert next(iter(iter_conditions(out.where))).value == ("X", "A")
     assert unresolved == []
 
 
@@ -171,7 +170,7 @@ def test_an_unresolvable_element_is_reported_not_dropped(registry):
         {"field": "widget.status", "op": "in", "value": ["retired", "banana"]}]}})
     out, unresolved = resolve_values(p, registry.root("widget"), now_year=2026)
     assert unresolved == [Unresolvable(field="widget.status", op="in", value="banana")]
-    assert list(iter_conditions(out.where))[0].value == ("retired", "banana")
+    assert next(iter(iter_conditions(out.where))).value == ("retired", "banana")
 
 
 def test_looks_nested_is_gone():

@@ -4,7 +4,8 @@ Keeping this narrow is what makes the pipeline testable without a network or an
 API key, and what makes the provider decision a one-file change
 rather than a rewrite.
 """
-from typing import Protocol, Sequence, runtime_checkable
+from collections.abc import Sequence
+from typing import Protocol, runtime_checkable
 
 
 class ProviderError(RuntimeError):
