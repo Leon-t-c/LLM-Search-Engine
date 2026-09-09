@@ -373,3 +373,24 @@ def test_an_explicit_now_year_still_wins(registry):
     ])
     response = translate("widgets from this year", registry, provider, now_year=1999)
     assert next(iter(iter_conditions(response.payload.where))).value == 1999
+
+
+def test_a_payload_for_another_root_is_not_accepted(registry):
+    """The routed root is a decision, not a suggestion.
+
+    The generated schema pins the root to one value, so a payload naming a
+    different one is outside what the model was offered. Validation is the
+    gate the host trusts, though, and asking only "does this root exist?"
+    would let a well-formed answer about the wrong table through with the
+    routing silently discarded — a wrong answer that looks entirely correct.
+    """
+    wrong = {"root": "vendor", "where": {"combinator": "AND", "children": [
+        {"field": "vendor.name", "op": "=", "value": "Acme"}]}}
+    provider = FakeProvider([
+        {"root": "widget", "joins": [], "groups": ["Lifecycle"]}, wrong, wrong,
+    ])
+    response = translate("who supplies these", registry, provider, now_year=2026)
+
+    assert response.status == "refused"
+    assert "vendor" in response.detail and "widget" in response.detail
+    assert len(provider.calls) == 3, "the wrong root should still get its one retry"

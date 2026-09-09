@@ -112,7 +112,9 @@ def _translate_stage_two(
         )
         try:
             proposed = Payload.model_validate(_normalise(raw))
-            return validate_payload(_with_router_joins(proposed, chosen), registry), ""
+            return validate_payload(
+                _with_router_joins(proposed, chosen), registry, expected_root=root.root
+            ), ""
         except (PayloadError, ValidationError) as exc:
             problem = str(exc)
             # Branch on the *kind* of failure, never on the wording of the

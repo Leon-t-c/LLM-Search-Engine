@@ -67,11 +67,29 @@ class PayloadError(ValueError):
         )
 
 
-def validate_payload(raw: dict | Payload, registry: Registry) -> Payload:
+def validate_payload(
+    raw: dict | Payload, registry: Registry, expected_root: str | None = None
+) -> Payload:
+    """Check a payload against the registry, and against the root it was for.
+
+    `expected_root` is the root the caller narrowed the schema to. Pass it
+    whenever you have it. The generated schema pins `root` to a single value,
+    so a payload naming a different one is already outside what the model was
+    offered — but this module is the gate the host trusts, and a gate that
+    only asks "does this root exist somewhere?" would let a well-formed answer
+    about the wrong table through, with the routing decision silently
+    discarded and nothing anywhere reporting a problem. Left optional so a
+    caller validating a payload it did not route (a stored one, a replayed
+    one) is not forced to invent an answer.
+    """
     payload = raw if isinstance(raw, Payload) else Payload.model_validate(raw)
     root = registry.root(payload.root)
     if root is None:
         raise PayloadError([f"unknown root {payload.root!r}"])
+    if expected_root is not None and payload.root != expected_root:
+        raise PayloadError(
+            [f"payload is for root {payload.root!r}, not {expected_root!r}"]
+        )
 
     problems: list[str] = []
     problems += _check_joins(payload, root)
