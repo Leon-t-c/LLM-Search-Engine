@@ -13,7 +13,7 @@ from ..ir.response import (
     Unresolved,
 )
 from ..ir.schema import NO_JOIN, json_schema_for
-from ..ir.validate import PayloadError, validate_payload
+from ..ir.validate import PROBLEM_UNJOINED, PayloadError, validate_payload
 from ..registry.models import Registry, RootSpec
 from .provider import Provider
 from .refusals import RefusalReason
@@ -53,9 +53,6 @@ _RETRY_JOIN = (
     "The fields you used are offered. Name the table each one comes from in "
     "`join` and leave the fields as they are."
 )
-
-#: The marker validation emits for a field that exists but is unjoined.
-_UNJOINED = "requires join"
 
 
 def translate(
@@ -106,7 +103,12 @@ def _translate_stage_two(
             return validate_payload(_with_router_joins(proposed, chosen), registry), ""
         except (PayloadError, ValidationError) as exc:
             problem = str(exc)
-            hint = _RETRY_JOIN if _UNJOINED in problem else _RETRY_DEFAULT
+            # Branch on the *kind* of failure, never on the wording of the
+            # sentence: the sentence is written for the model to read and is
+            # free to change, and a substring match on it would revert this
+            # choice silently the first time someone improved it.
+            unjoined = isinstance(exc, PayloadError) and PROBLEM_UNJOINED in exc.kinds
+            hint = _RETRY_JOIN if unjoined else _RETRY_DEFAULT
             asked = (
                 f"{question}\n\n"
                 f"Your previous answer failed validation: {problem}\n"

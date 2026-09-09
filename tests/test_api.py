@@ -361,3 +361,23 @@ def test_an_unconfigured_token_refuses_every_request(registry):
         "/translate", json=GUARDED, headers={"Authorization": "Bearer anything"}
     )
     assert response.status_code == 503
+
+
+def test_the_claude_fallback_setting_reaches_the_adapter():
+    """Wired end to end, both ways: a field nothing reads is not a knob."""
+    from cert_nlq.api.app import _build_provider
+    from cert_nlq.config import Settings
+
+    off = _build_provider(
+        Settings(_env_file=None, provider="claude", anthropic_api_key="sk-not-real")
+    )
+    on = _build_provider(
+        Settings(
+            _env_file=None,
+            provider="claude",
+            anthropic_api_key="sk-not-real",
+            claude_fallbacks=True,
+        )
+    )
+    assert off._use_fallbacks is False
+    assert on._use_fallbacks is True

@@ -170,6 +170,7 @@ def _build_provider(settings) -> Provider:
         return ClaudeProvider(
             settings.anthropic_api_key,
             settings.claude_model,
+            use_fallbacks=settings.claude_fallbacks,
             on_usage=_log_usage,
         )
     if settings.provider == "openai":

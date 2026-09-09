@@ -296,3 +296,52 @@ def test_a_validation_failure_still_refuses_as_field_not_in_schema(registry):
     provider = FakeProvider([ROUTE, bad, bad])
     response = translate("nonsense", registry, provider, now_year=2026)
     assert response.reason == RefusalReason.FIELD_NOT_IN_SCHEMA
+
+
+def test_the_join_hint_is_chosen_by_the_kind_of_failure_not_its_wording(
+    registry, monkeypatch
+):
+    """Reword the message and the hint must still be the join one.
+
+    The hint used to be picked by searching the formatted message for a
+    phrase, which quietly made that phrase part of the contract: reword it —
+    an ordinary, encouraged thing to do to text a model reads — and the
+    branch stops firing with nothing failing to say so. This test rewords it
+    on purpose.
+    """
+    from cert_nlq.ir import validate as validate_module
+    from cert_nlq.translate.provider import FakeProvider
+
+    real = validate_module._resolve_field
+
+    def reworded(key, available, all_fields, label):
+        spec, problem = real(key, available, all_fields, label)
+        if getattr(problem, "kind", None) == validate_module.PROBLEM_UNJOINED:
+            problem = validate_module.Problem(
+                validate_module.PROBLEM_UNJOINED,
+                f"{key!r} lives on a table you have not asked for",
+            )
+        return spec, problem
+
+    monkeypatch.setattr(validate_module, "_resolve_field", reworded)
+
+    provider = FakeProvider([
+        {"root": "widget", "joins": [], "groups": ["Commercial"]},
+        {"root": "widget", "where": {"combinator": "AND",
+          "children": [{"field": "shipment.amount", "op": ">", "value": 500}]}},
+        {"root": "widget", "join": ["shipment"], "where": {"combinator": "AND",
+          "children": [{"field": "shipment.amount", "op": ">", "value": 500}]}},
+    ])
+    translate("widgets shipped for over 500", registry, provider, now_year=2026)
+    retry = provider.calls[2]["question"]
+    assert "lives on a table you have not asked for" in retry
+    assert "`join`" in retry, "the join hint, chosen without reading the message"
+    assert "only the offered fields" not in retry
+
+
+def test_a_failure_of_another_kind_still_gets_the_general_hint(registry):
+    """The counterpart: the structural branch must not fire on everything."""
+    from cert_nlq.ir.validate import PROBLEM_UNJOINED, PayloadError
+
+    error = PayloadError(["unknown field 'widget.invented'"])
+    assert PROBLEM_UNJOINED not in error.kinds

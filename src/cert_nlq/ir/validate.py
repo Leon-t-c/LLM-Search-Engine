@@ -21,10 +21,50 @@ def _depth(node, level: int = 1) -> int:
     return max((_depth(c, level + 1) for c in node.children), default=level)
 
 
+#: What kind of thing went wrong, for a caller that has to *branch* on the
+#: failure rather than show it. Only the kinds something branches on are
+#: named; everything else is `OTHER`.
+PROBLEM_UNJOINED = "unjoined"
+PROBLEM_OTHER = "other"
+
+
+class Problem(str):
+    """One validation problem: the sentence, plus what kind of problem it is.
+
+    A `str` subclass rather than a record, so every existing consumer — the
+    join into one message, the text fed back to the model as retry guidance,
+    the equality checks in the suite — keeps working untouched, while a caller
+    that must pick a different course of action for a different failure has
+    something stable to test.
+
+    The alternative was a substring search on the formatted sentence, which is
+    what the retry hint used to do. That makes the wording of a message load
+    bearing without saying so: reword it and the branch silently stops firing,
+    with nothing failing to say so.
+    """
+
+    def __new__(cls, kind: str, message: str) -> "Problem":
+        problem = super().__new__(cls, message)
+        problem.kind = kind
+        return problem
+
+
 class PayloadError(ValueError):
     def __init__(self, problems: list[str]) -> None:
         self.problems = problems
         super().__init__("; ".join(problems))
+
+    @property
+    def kinds(self) -> frozenset[str]:
+        """The distinct problem kinds collected here.
+
+        Tolerates a plain `str` in `problems`: this type is constructible from
+        anywhere, and a caller that hand-built one should get "other" rather
+        than an AttributeError.
+        """
+        return frozenset(
+            getattr(problem, "kind", PROBLEM_OTHER) for problem in self.problems
+        )
 
 
 def validate_payload(raw: dict | Payload, registry: Registry) -> Payload:
@@ -82,8 +122,10 @@ def _resolve_field(key: str, available: dict, all_fields: dict, label: str):
         return spec, None
     elsewhere = all_fields.get(key)
     if elsewhere is not None:
-        return None, f"{key!r} requires join {elsewhere.table!r}"
-    return None, f"unknown {label} {key!r}"
+        return None, Problem(
+            PROBLEM_UNJOINED, f"{key!r} requires join {elsewhere.table!r}"
+        )
+    return None, Problem(PROBLEM_OTHER, f"unknown {label} {key!r}")
 
 
 def _check_conditions(payload: Payload, root: RootSpec, available: dict) -> list[str]:

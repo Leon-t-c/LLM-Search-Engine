@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     provider: Literal["openai", "claude"] = "openai"
     anthropic_api_key: str = ""
     claude_model: str = "claude-opus-5"
+    #: Let the platform answer with a substitute model when the requested one
+    #: declines. Off by default: a fallback changes which model answered, so
+    #: turning it on is a deliberate availability decision for one deploy, not
+    #: something a scored run should inherit without saying so.
+    claude_fallbacks: bool = False
 
 
 @lru_cache

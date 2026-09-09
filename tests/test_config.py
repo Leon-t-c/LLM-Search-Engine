@@ -42,3 +42,23 @@ def test_the_provider_setting_accepts_both_backends(monkeypatch):
     for value in ("openai", "claude"):
         monkeypatch.setenv("CERT_NLQ_PROVIDER", value)
         assert Settings(_env_file=None).provider == value
+
+
+def test_the_claude_fallback_is_off_unless_asked_for(monkeypatch):
+    """A fallback changes which model answered, so it is opt-in per deploy."""
+    monkeypatch.delenv("CERT_NLQ_CLAUDE_FALLBACKS", raising=False)
+    assert Settings(_env_file=None).claude_fallbacks is False
+
+
+def test_the_claude_fallback_can_be_turned_on(monkeypatch):
+    """Wave A removed the rescue from production; this is the way back."""
+    monkeypatch.setenv("CERT_NLQ_CLAUDE_FALLBACKS", "true")
+    assert Settings(_env_file=None).claude_fallbacks is True
+
+
+def test_the_fallback_knob_is_documented_for_an_operator():
+    """A setting nobody can discover is not a knob."""
+    from pathlib import Path
+
+    example = Path(__file__).resolve().parents[1] / ".env.example"
+    assert "CERT_NLQ_CLAUDE_FALLBACKS" in example.read_text(encoding="utf-8")
