@@ -215,7 +215,7 @@ def test_no_database_driver_is_importable():
     a real import name, so each assertion can actually fail — `psycopg2-binary`
     is a distribution, not a module, and would pass vacuously forever.
 
-    SQLAlchemy is deliberately absent: the phase-2 eval store uses it, and it
+    SQLAlchemy is deliberately absent: the evaluation store uses it, and it
     grants no database access on its own.
     """
     for module in (

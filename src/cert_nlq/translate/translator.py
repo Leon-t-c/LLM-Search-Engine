@@ -216,6 +216,8 @@ def _reconcile_joins(payload: Payload, chosen: Route, root: RootSpec) -> Payload
 
     A join the model named *and* used is kept in its own order, and the
     router's are appended after — nothing here depends on iteration order.
+    Named twice, it is joined once: "joined when a field comes from it" is
+    not a thing that can be true twice.
 
     Left alone entirely when the model ignored the schema's single-valued
     `root`: the router's joins belong to another entity then, and touching
@@ -224,7 +226,7 @@ def _reconcile_joins(payload: Payload, chosen: Route, root: RootSpec) -> Payload
     if payload.root != chosen.root:
         return payload
     used = _tables_referenced(payload, root)
-    kept = tuple(t for t in payload.join if t in used)
+    kept = tuple(dict.fromkeys(t for t in payload.join if t in used))
     kept += tuple(t for t in chosen.joins if t in used and t not in kept)
     return _with_joins(payload, kept)
 
@@ -315,7 +317,8 @@ def _clarify(
     the rest are simply not asserted.
 
     Candidates carry the registry's field label with the raw stored value —
-    `Status = X`, never a paraphrase. Users read these codes fluently. Each
+    `Status = X`, never a paraphrase: a code the reader recognises beats a
+    restatement of it. Each
     candidate is offered under the operator the phrase was actually asked
     under — for a list (`in`) operator that means each
     candidate offers one legal element, not a whole list.

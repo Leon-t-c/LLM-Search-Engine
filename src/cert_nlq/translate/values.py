@@ -94,8 +94,9 @@ def resolve_money(raw) -> float | None:
     silent-wrong-answer failure this module exists to prevent, and it is the
     overflow case rather than a literal "nan" that makes it reachable.
 
-    A negative amount is accepted deliberately — credits and reversals are
-    legitimate values in this position.
+    A negative amount is accepted deliberately: a money column is signed,
+    and deciding which signs are meaningful is the registry's business, not
+    this function's.
     """
     try:
         amount = float(_MONEY_STRIP.sub("", str(raw)))

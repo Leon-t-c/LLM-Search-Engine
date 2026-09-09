@@ -220,6 +220,7 @@ def test_a_join_the_model_supplied_but_never_used_is_dropped(registry):
     assert response.payload.join == ("shipment",), "vendor is named by no field"
     assert len(provider.calls) == 2, "dropping it must not cost the retry"
 
+
 def test_a_join_shaped_failure_does_not_ask_for_a_different_field(registry):
     """"Pick another field" is the opposite of the fix when the field is fine."""
     provider = FakeProvider([
@@ -497,3 +498,17 @@ def test_a_clarification_drops_a_join_its_pruning_orphaned(registry):
 
     assert response.status == "needs_clarification"
     assert response.payload.join == (), "the only shipment field was pruned"
+
+
+def test_a_table_named_twice_is_joined_once(registry):
+    """"Joined when a field comes from it" is not a thing that can be true twice."""
+    provider = FakeProvider([
+        {"root": "widget", "joins": [], "groups": ["Commercial"]},
+        {"root": "widget", "join": ["shipment", "shipment"],
+         "where": {"combinator": "AND", "children": [
+             {"field": "shipment.amount", "op": ">", "value": 5}]}},
+    ])
+    response = translate("big shipments", registry, provider, now_year=2026)
+
+    assert response.status == "ok"
+    assert response.payload.join == ("shipment",)

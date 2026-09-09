@@ -84,7 +84,7 @@ class GroupSpec(BaseModel):
     """One picker section.
 
     `description` exists for the router prompt: a host application's group
-    names are UI section labels — often abbreviated, sometimes unrelated to
+    names are UI section labels — often abbreviated, and not always tied to
     the fields they contain — which a model cannot reliably interpret from
     the name alone.
     """

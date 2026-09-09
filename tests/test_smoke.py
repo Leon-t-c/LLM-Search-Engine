@@ -32,7 +32,7 @@ def test_no_secret_shaped_strings_are_committed():
 
 
 def test_the_readme_describes_what_is_here_now():
-    """It claimed "implementation pending" for forty commits after the start.
+    """It claimed "implementation pending" long after that stopped being true.
 
     A tripwire, not a review: it cannot tell whether the README is *good*,
     only that it has stopped describing an empty repository, and that the

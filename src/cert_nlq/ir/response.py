@@ -6,11 +6,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from ..translate.refusals import RefusalReason
 from .payload import Payload
 
-# No confidence thresholds here on purpose (decided 2026-09-04).
+# No confidence thresholds here on purpose.
 # The demo has three outcomes: ok, needs_clarification (a value failed to
 # resolve — deterministic), refused. Nothing scores a guess, so a threshold
-# would be two numbers we could not defend. Phase 2 measures the
-# coverage-versus-caution curve and sets them against data.
+# would be two numbers we could not defend. A later evaluation stage
+# measures the coverage-versus-caution curve and sets them against data.
 #
 # `Flag` and `Ok.flags` stay in the envelope: they cost nothing, they document
 # where the middle rung will go, and they keep the response shape stable when
