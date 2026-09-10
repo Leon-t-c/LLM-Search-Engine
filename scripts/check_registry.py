@@ -29,6 +29,56 @@ from cert_nlq.ir.schema import json_schema_for
 from cert_nlq.registry.client import RegistryClient, RegistryUnavailable
 from cert_nlq.translate import router
 
+NOT_LISTENING = """
+  Nothing is listening there. Start the host first, and set the token in
+  the same terminal *before* starting it -- a running process cannot pick
+  the variable up afterwards:
+
+    $env:CERT_SERVICE_TOKEN = "localdev"
+    <conda-python> manage.py runserver 8000
+"""
+
+UNCONFIGURED = """
+  The host is running but has no CERT_SERVICE_TOKEN, so it refuses
+  everyone. That is the guard working, not a bug: a blank setting fails
+  closed rather than serving anyone who asks.
+
+  Set it in the terminal the server runs in and restart the server. If you
+  set it after the server was already up, it will not have been picked up.
+"""
+
+TOKENS_DISAGREE = """
+  The host is configured, but the two tokens differ. Make
+  CERT_NLQ_REGISTRY_TOKEN here match CERT_SERVICE_TOKEN there.
+"""
+
+
+def _diagnose(url, token):
+    """Turn the host's refusal into an instruction.
+
+    The service keeps its own error text out of the exception on purpose --
+    it is a public surface and its bodies are fixed strings. Here we are the
+    operator of both sides on one machine, so it is worth asking again and
+    saying what the status means: 503 and 401 are one character apart in a
+    log and have opposite causes, and the fix for one does nothing for the
+    other.
+    """
+    import httpx
+
+    try:
+        response = httpx.get(
+            url.rstrip("/") + "/query/registry/",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=5.0,
+        )
+    except Exception:
+        return NOT_LISTENING
+    if response.status_code == 503:
+        return UNCONFIGURED
+    if response.status_code == 401:
+        return TOKENS_DISAGREE
+    return f"\n  Host said {response.status_code}: {response.text[:200]}"
+
 
 def main() -> int:
     url = os.environ.get("CERT_NLQ_REGISTRY_URL", "http://127.0.0.1:8000")
@@ -41,9 +91,8 @@ def main() -> int:
     try:
         registry = RegistryClient(url, token).fetch()
     except RegistryUnavailable as exc:
-        # The message carries the host's own reason: a 401 means the tokens
-        # disagree, a validation error names the field that failed.
         print(f"FAILED: {exc}")
+        print(_diagnose(url, token))
         return 1
 
     print("== 1. it parses ==")
