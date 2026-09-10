@@ -53,8 +53,25 @@ class Route(BaseModel):
 
 
 def sample_labels(root: RootSpec, group: str) -> list[str]:
-    """Up to MAX_SAMPLE_LABELS field labels from `group`, in label order."""
-    return [f.label for f in root.fields_in_group(group)][:MAX_SAMPLE_LABELS]
+    """Up to MAX_SAMPLE_LABELS labels, spread across the group's range.
+
+    Taken at an even stride rather than off the front. Labels arrive sorted,
+    so a prefix is an alphabetical accident, not a sample: measured against
+    a real registry, one 40-field group's first eight labels all began "#"
+    or "%", so every example was a room count while the group also held the
+    sale prices another group's description points at. The model is told to
+    judge a group by its description and its examples; a prefix makes the
+    examples argue against the description.
+
+    A stride keeps that cheap and, unlike a random sample, deterministic --
+    this text is part of a cached prompt prefix, so the same registry must
+    produce the same bytes on every call and in every process.
+    """
+    labels = [f.label for f in root.fields_in_group(group)]
+    if len(labels) <= MAX_SAMPLE_LABELS:
+        return labels
+    stride = len(labels) / MAX_SAMPLE_LABELS
+    return [labels[int(i * stride)] for i in range(MAX_SAMPLE_LABELS)]
 
 
 def route_schema(registry: Registry) -> dict:

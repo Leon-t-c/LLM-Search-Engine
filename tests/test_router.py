@@ -133,3 +133,54 @@ def test_a_single_root_registry_routes_on_groups_alone(registry_json):
     # No joins to offer, so the enum falls back to the empty-string sentinel
     # rather than producing an illegal empty enum.
     assert schema["properties"]["joins"]["items"]["enum"] == [""]
+
+
+def test_the_sample_spreads_across_the_group_rather_than_taking_a_prefix(registry):
+    """Labels arrive sorted, so the first eight are an alphabetical accident.
+
+    A prefix makes the examples argue against the description: a group whose
+    early labels all share a prefix looks, to the model, like a group about
+    only that. The sample has to reach the far end of the range.
+    """
+    from cert_nlq.translate.router import MAX_SAMPLE_LABELS, sample_labels
+
+    root = registry.root("widget")
+    status = root.fields_by_key["widget.status"]
+    # Two clearly separated runs: everything a prefix would reach, and
+    # everything it would not.
+    padded = root.model_copy(update={"fields": tuple(
+        status.model_copy(update={"key": f"widget.a{i}", "column": f"a{i}",
+                                  "label": f"Aaa {i:02d}", "group": "Lifecycle"})
+        for i in range(20)
+    ) + tuple(
+        status.model_copy(update={"key": f"widget.z{i}", "column": f"z{i}",
+                                  "label": f"Zzz {i:02d}", "group": "Lifecycle"})
+        for i in range(20)
+    )})
+
+    labels = sample_labels(padded, "Lifecycle")
+
+    assert len(labels) == MAX_SAMPLE_LABELS
+    assert any(lab.startswith("Zzz") for lab in labels), (
+        "a prefix sample would show only the 'Aaa' half and the model would "
+        "never learn the group holds anything else"
+    )
+    assert any(lab.startswith("Aaa") for lab in labels)
+    assert labels == sorted(labels), "still in label order"
+
+
+def test_a_small_group_is_shown_whole(registry):
+    """Nothing is dropped or reordered when everything fits."""
+    from cert_nlq.translate.router import sample_labels
+
+    root = registry.root("widget")
+    labels = sample_labels(root, "Commercial")
+    assert labels == [f.label for f in root.fields_in_group("Commercial")]
+
+
+def test_the_sample_is_identical_across_calls(registry):
+    """It is part of a cached prompt prefix, so it must be byte-stable."""
+    from cert_nlq.translate.router import sample_labels
+
+    root = registry.root("widget")
+    assert sample_labels(root, "Lifecycle") == sample_labels(root, "Lifecycle")
