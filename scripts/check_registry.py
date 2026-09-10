@@ -43,8 +43,15 @@ UNCONFIGURED = """
   everyone. That is the guard working, not a bug: a blank setting fails
   closed rather than serving anyone who asks.
 
-  Set it in the terminal the server runs in and restart the server. If you
-  set it after the server was already up, it will not have been picked up.
+  Put CERT_SERVICE_TOKEN in the host's .env (copy .env.example) and restart
+  it. The file is read at startup, so a running process will not pick it up.
+
+  If you already did that, check that your restart actually happened --
+  an older server still holding the port makes the new one fail to bind,
+  and you keep talking to the old one:
+
+    Get-NetTCPConnection -LocalPort 8000 -State Listen |
+      Select-Object OwningProcess
 """
 
 TOKENS_DISAGREE = """
