@@ -438,3 +438,37 @@ def test_the_strict_pass_leaves_a_bare_ref_bare():
     from cert_nlq.ir.schema import strictify
 
     assert strictify({"$ref": "#/$defs/X"}) == {"$ref": "#/$defs/X"}
+
+
+def test_a_root_spans_every_table_that_is_not_a_declared_join(registry):
+    """"The root's fields" is not "the root table's fields".
+
+    A root spans whatever tables the host joins unconditionally -- for a
+    real property application that is four of them -- and only the tables
+    the registry *declares as joins* have to be asked for. Scoping on the
+    root's table name instead put 305 of 540 fields out of reach, and the
+    fixture never showed it because almost everything sits on one table.
+    """
+    root = registry.root("widget")
+    joinable = {j.table for j in root.joins}
+    other = root.model_copy(update={"fields": root.fields + tuple(
+        f.model_copy(update={"key": "sidecar.note", "table": "sidecar",
+                             "column": "note", "group": "Lifecycle"})
+        for f in root.fields[:1]
+    )})
+
+    scoped = {f.key for f in fields_in_scope(other, (), ())}
+
+    assert "sidecar.note" in scoped, (
+        "a table the registry does not declare as a join needs no join"
+    )
+    assert not any(f.table in joinable for f in fields_in_scope(other, (), ())), (
+        "a declared join still has to be asked for"
+    )
+
+
+def test_a_declared_join_is_still_out_of_scope_until_it_is_asked_for(registry):
+    root = registry.root("widget")
+    assert not any(f.table == "shipment" for f in fields_in_scope(root, (), ()))
+    assert any(f.table == "shipment"
+               for f in fields_in_scope(root, (), ("shipment",)))

@@ -119,9 +119,17 @@ def _check_joins(payload: Payload, root: RootSpec) -> list[str]:
 
 
 def _available_fields(payload: Payload, root: RootSpec) -> dict:
-    """Field specs reachable given the requested joins."""
-    tables = {root.root} | set(payload.join)
-    return {f.key: f for f in root.fields if f.table in tables}
+    """Field specs reachable given the requested joins.
+
+    Only a table the registry declares as a join has to be asked for. A
+    root spans every other table its fields sit on, because the host joins
+    those unconditionally -- checking against the root's own table name
+    would refuse more than half of a real registry.
+    """
+    joinable = {j.table for j in root.joins}
+    allowed = set(payload.join)
+    return {f.key: f for f in root.fields
+            if f.table not in joinable or f.table in allowed}
 
 
 def _resolve_field(key: str, available: dict, all_fields: dict, label: str):

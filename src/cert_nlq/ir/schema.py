@@ -56,18 +56,26 @@ def fields_in_scope(
     groups: Sequence[str] = (),
     joins: Sequence[str] = (),
 ) -> list[FieldSpec]:
-    """Fields the model may reference: the root's own, plus joined tables'.
+    """Fields the model may reference: the root's, plus any joined table's.
 
-    An empty `groups` means every group. A field belonging to another table is
-    in scope only when that table is among `joins`. The root's identity groups
-    are always kept, so a stage-1 group miss narrows the slice without
+    "The root's" is not "the root table's". A root spans whatever tables the
+    host joins unconditionally -- for a property application that is four of
+    them -- and only the tables the registry *declares as joins* have to be
+    asked for. Scoping on the root's table name instead put 56% of a real
+    registry out of reach and no test noticed, because the fixture happened
+    to keep almost everything on one table.
+
+    An empty `groups` means every group. The root's identity groups are
+    always kept, so a stage-1 group miss narrows the slice without
     stranding the key columns.
 
     Registry field order is preserved, which keeps the generated Literal — and
     therefore the JSON schema handed to the model — stable across calls.
     """
-    tables = {root.root} | set(joins)
-    candidates = [f for f in root.fields if f.table in tables]
+    joinable = {j.table for j in root.joins}
+    allowed = set(joins)
+    candidates = [f for f in root.fields
+                  if f.table not in joinable or f.table in allowed]
     if not groups:
         return candidates
 
