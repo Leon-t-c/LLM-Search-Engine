@@ -76,7 +76,7 @@ def translate(
 
     resolved, unresolved = resolve_values(payload, root, now_year or _this_year())
     if unresolved:
-        return _clarify(resolved, root, unresolved, registry.version)
+        return _clarify(resolved, root, unresolved, registry.version, question)
     return Ok(payload=resolved, registry_version=registry.version)
 
 
@@ -304,8 +304,35 @@ def _as_group(node) -> Group:
     return node if isinstance(node, Group) else Group(combinator="AND", children=(node,))
 
 
+def _spoken_by_the_user(phrase: str, question: str) -> bool:
+    """Is `phrase` actually a span of the question the user typed?
+
+    `Unresolved.phrase` is whatever the model put in the condition's value
+    slot, and the first real call put the model's own deliberation there:
+
+        Queens placeholder? no. Need exact wording Queens.
+
+    which this function's callers then quoted back to the user verbatim --
+    "Which Borough did you mean by 'Queens placeholder? no. Need exact
+    wording Queens.'?" -- on the screen of someone billing by the hour.
+
+    Both this module and the host's review panel already described the
+    phrase as a span of the user's question. Neither checked it. A
+    substring test is crude, and deliberately so: it cannot be argued with,
+    it costs nothing, and it fails toward saying less rather than more.
+    Losing a legitimate quotation to a paraphrase the model made is a far
+    cheaper mistake than showing a reader the model thinking out loud.
+    """
+    cleaned = phrase.strip()
+    return bool(cleaned) and cleaned.casefold() in question.casefold()
+
+
 def _clarify(
-    payload: Payload, root: RootSpec, unresolved: list[Unresolvable], version: str
+    payload: Payload,
+    root: RootSpec,
+    unresolved: list[Unresolvable],
+    version: str,
+    question: str,
 ) -> TranslateResponse:
     """Ask about the first unresolved value; ship none of them.
 
@@ -338,10 +365,13 @@ def _clarify(
         # validated. Either it has no closed vocabulary to offer as
         # candidates, or pruning the unresolved values left nothing for the
         # caller's builder — both are the value failing, not the field.
-        return Refused(
-            reason=RefusalReason.VALUE_NOT_UNDERSTOOD,
-            detail=f"Could not work out what {phrase!r} means here.",
+        label = spec.label if spec is not None else "value"
+        detail = (
+            f"Could not work out what {phrase!r} means here."
+            if _spoken_by_the_user(phrase, question)
+            else f"Could not work out which {label} you meant."
         )
+        return Refused(reason=RefusalReason.VALUE_NOT_UNDERSTOOD, detail=detail)
     candidates = tuple(
         Candidate(
             field=key,
@@ -357,7 +387,11 @@ def _clarify(
         ),
         unresolved=Unresolved(
             phrase=phrase,
-            question=f"Which {spec.label} did you mean by {phrase!r}?",
+            question=(
+                f"Which {spec.label} did you mean by {phrase!r}?"
+                if _spoken_by_the_user(phrase, question)
+                else f"Which {spec.label} did you mean?"
+            ),
             candidates=candidates,
         ),
         registry_version=version,

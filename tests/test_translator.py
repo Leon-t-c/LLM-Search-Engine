@@ -72,6 +72,52 @@ def test_an_unresolved_value_becomes_a_clarification_with_candidates(registry):
     assert response.unresolved.candidates[0].label == "Status"
 
 
+def test_the_clarification_quotes_a_phrase_the_user_actually_said(registry):
+    # A second, resolvable condition: a sole unresolvable one refuses
+    # instead, because pruning it would leave nothing to seed the builder.
+    provider = FakeProvider([
+        ROUTE,
+        {"root": "widget", "where": {"combinator": "AND",
+          "children": [{"field": "widget.region", "op": "=", "value": "N"},
+                        {"field": "widget.status", "op": "=",
+                         "value": "problematic"}]}},
+    ])
+    response = translate("problematic widgets up north", registry, provider,
+                         now_year=2026)
+    assert response.unresolved.question ==         "Which Status did you mean by 'problematic'?"
+
+
+def test_the_clarification_does_not_quote_the_model_thinking_out_loud(registry):
+    """Taken verbatim from the first real provider call.
+
+    `Unresolved.phrase` is whatever the model put in the value slot, and
+    that call put its own deliberation there. The question built from it
+    read, on a fee-earner's screen:
+
+        Which Borough did you mean by 'Queens placeholder? no. Need exact
+        wording Queens.'?
+
+    Both this module and the host's review panel described the phrase as a
+    span of the user's question. Neither checked it was one.
+    """
+    deliberation = "Queens placeholder? no. Need exact wording Queens."
+    provider = FakeProvider([
+        ROUTE,
+        {"root": "widget", "where": {"combinator": "AND",
+          "children": [{"field": "widget.region", "op": "=", "value": "N"},
+                        {"field": "widget.status", "op": "=",
+                         "value": deliberation}]}},
+    ])
+    response = translate("problematic widgets up north", registry, provider,
+                         now_year=2026)
+    assert response.status == "needs_clarification"
+    assert response.unresolved.question == "Which Status did you mean?"
+    assert "placeholder" not in response.unresolved.question
+    # The raw value is still carried for logging and diagnosis -- it is how
+    # this defect was found -- it simply must not be read back to a user.
+    assert response.unresolved.phrase == deliberation
+
+
 def test_a_schema_invalid_response_retries_once_then_succeeds(registry):
     provider = FakeProvider([
         ROUTE,
