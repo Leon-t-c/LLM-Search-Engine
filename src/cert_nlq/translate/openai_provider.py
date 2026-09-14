@@ -46,6 +46,26 @@ _NAME_MAX = 64
 _NAME_FALLBACK = "payload"
 
 
+#: Per-request ceiling and retry budget for the provider SDK.
+#:
+#: Both SDKs default to a 10-minute timeout and two automatic retries, so an
+#: unconfigured client can keep working -- and keep spending -- for many
+#: minutes after the caller has given up. The host's own client times out far
+#: sooner, which made a client-side timeout say nothing at all about whether
+#: the call succeeded, or what it cost. Bounded here so the server cannot
+#: outlive its caller.
+#:
+#: The invariant worth preserving: the host's timeout must exceed
+#: `PROVIDER_TIMEOUT * (PROVIDER_RETRIES + 1) * 2` -- two stages -- so that a
+#: timeout at the host means the work really failed rather than that the host
+#: gave up early. The host's is currently 120s against a worst case of 90s.
+#:
+#: One retry, not the SDK's two: a retried call is a call that is paid for,
+#: and §12a of the design spec makes that a cost decision rather than a
+#: default to inherit.
+PROVIDER_TIMEOUT = 45.0
+PROVIDER_RETRIES = 1
+
 class OpenAIProvider:
     def __init__(
         self,
@@ -72,7 +92,11 @@ class OpenAIProvider:
         else:
             from openai import OpenAI
 
-            self._client = OpenAI(api_key=api_key)
+            self._client = OpenAI(
+                api_key=api_key,
+                timeout=PROVIDER_TIMEOUT,
+                max_retries=PROVIDER_RETRIES,
+            )
 
     @staticmethod
     def _format_name(schema_name: str) -> str:

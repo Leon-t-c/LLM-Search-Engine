@@ -6,6 +6,7 @@ contract, so nothing above the protocol knows which vendor is in use.
 import json
 import logging
 
+from .openai_provider import PROVIDER_RETRIES, PROVIDER_TIMEOUT
 from .provider import ProviderError, token_count
 
 logger = logging.getLogger(__name__)
@@ -75,7 +76,13 @@ class ClaudeProvider:
         else:
             import anthropic
 
-            self._client = anthropic.Anthropic(api_key=api_key)
+            # Bounded for the same reason as the OpenAI adapter; see
+            # PROVIDER_TIMEOUT there for the invariant this preserves.
+            self._client = anthropic.Anthropic(
+                api_key=api_key,
+                timeout=PROVIDER_TIMEOUT,
+                max_retries=PROVIDER_RETRIES,
+            )
 
     def complete(
         self, system: str, question: str, schema: dict, schema_name: str
