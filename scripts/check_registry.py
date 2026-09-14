@@ -22,9 +22,9 @@ Three questions, in the order they can bite:
    it is measurable before spending anything.
 """
 import json
-import os
 import sys
 
+from cert_nlq.config import get_settings
 from cert_nlq.ir.schema import json_schema_for
 from cert_nlq.registry.client import RegistryClient, RegistryUnavailable
 from cert_nlq.translate import router
@@ -88,10 +88,21 @@ def _diagnose(url, token):
 
 
 def main() -> int:
-    url = os.environ.get("CERT_NLQ_REGISTRY_URL", "http://127.0.0.1:8000")
-    token = os.environ.get("CERT_NLQ_REGISTRY_TOKEN", "")
+    # Read through `get_settings()`, the same object the service reads,
+    # rather than `os.environ` directly. The service loads `.env` via
+    # pydantic-settings; this script did not, so a correctly configured
+    # `.env` produced "Set CERT_NLQ_REGISTRY_TOKEN" here while the service
+    # itself was fine -- the check said "unconfigured" about the one thing
+    # that was configured. One source of truth avoids that entirely.
+    #
+    # `.env` is resolved relative to the working directory, so run this
+    # from the repo root.
+    settings = get_settings()
+    url = settings.registry_url or "http://127.0.0.1:8000"
+    token = settings.registry_token
     if not token:
-        print("Set CERT_NLQ_REGISTRY_TOKEN to the host's service token.")
+        print("Set CERT_NLQ_REGISTRY_TOKEN in .env (or the environment) to "
+              "the host's CERT_SERVICE_TOKEN.")
         return 2
 
     print(f"fetching {url} ...\n")

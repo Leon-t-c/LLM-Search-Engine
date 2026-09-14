@@ -22,7 +22,7 @@ def test_fields_by_key(registry):
 def test_group_names_follow_registry_order_not_alphabetical(registry):
     """The host app lists sections the way its tabs do; preserve that."""
     assert registry.root("widget").group_names() == [
-        "Location & Identity", "Lifecycle", "Commercial",
+        "Location & Identity", "Lifecycle", "Commercial", "Aftercare",
     ]
 
 
@@ -59,7 +59,8 @@ def test_an_undeclared_group_is_appended_not_rejected(registry_json):
     )
     root = Registry.model_validate(registry_json).root("widget")
     assert root.group_names() == [
-        "Location & Identity", "Lifecycle", "Commercial", "Undeclared",
+        "Location & Identity", "Lifecycle", "Commercial", "Aftercare",
+        "Undeclared",
     ]
     assert root.group("Undeclared") is None
 

@@ -15,10 +15,12 @@ def test_empty_groups_means_every_group(registry):
     root = registry.root("widget")
     keys = {f.key for f in fields_in_scope(root, groups=(), joins=())}
     # shipment.amount belongs to a joined table, so it is out of scope
-    # until the join is requested.
+    # until the join is requested. widget.warranty is on a second *base*
+    # table, which the host joins unconditionally, so it is in scope.
     assert keys == {
         "widget.region", "widget.serial", "widget.year",
         "widget.status", "widget.price", "widget.shipped", "widget.certified",
+        "widget.warranty",
     }
 
 
@@ -56,6 +58,33 @@ def test_a_joined_table_brings_its_fields_into_scope(registry):
     root = registry.root("widget")
     keys = {f.key for f in fields_in_scope(root, groups=("Commercial",), joins=("shipment",))}
     assert "shipment.amount" in keys
+
+
+def test_a_narrow_group_does_not_drag_in_the_other_base_tables(registry):
+    """The fallback below is for *joins*, and only for joins.
+
+    It used to fire for any table a selected group failed to cover, which
+    included the tables the host joins unconditionally. So naming one
+    narrow group pulled in every field of every other base table and the
+    narrowing barely narrowed: on the real registry, the 18-field
+    'Property: Summary' produced 250 fields.
+
+    `widget.warranty` sits on a second base table and belongs to no
+    selected group, so it must be out of scope here. The rest of the
+    suite cannot see this: every other non-`widget` field is behind a
+    join, which is exactly why the defect survived.
+    """
+    root = registry.root("widget")
+    keys = {f.key for f in fields_in_scope(root, groups=("Lifecycle",), joins=())}
+    assert "widget.warranty" not in keys
+    assert "widget.status" in keys
+
+
+def test_a_narrow_group_still_keeps_the_identity_group(registry):
+    """Narrowing must not strand the key columns."""
+    root = registry.root("widget")
+    keys = {f.key for f in fields_in_scope(root, groups=("Lifecycle",), joins=())}
+    assert "widget.serial" in keys
 
 
 def test_a_join_no_selected_group_covers_falls_back_to_all_its_fields(registry):

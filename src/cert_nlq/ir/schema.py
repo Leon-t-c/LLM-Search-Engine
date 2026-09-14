@@ -81,10 +81,23 @@ def fields_in_scope(
 
     wanted = set(groups) | root.identity_groups()
     kept = [f for f in candidates if f.group in wanted]
-    # A joined table that no selected group covers would contribute nothing,
-    # which makes the join pointless — fall back to all of that table's fields.
+    # A *joined* table that no selected group covers would contribute
+    # nothing, which makes the join pointless — fall back to all of that
+    # table's fields.
+    #
+    # Confined to `joinable`. Without that guard the fallback also fired for
+    # the tables the host joins unconditionally, so naming one narrow group
+    # pulled in every field of every other base table: on the real registry,
+    # asking for the 18-field 'Property: Summary' produced 250 fields, and
+    # the stage-1 narrowing this function exists to perform was mostly
+    # undone. It was invisible to the suite because the fixture keeps all
+    # but one table behind a join — the same one-table blind spot this
+    # docstring already warns about, found the second time by measuring the
+    # generated schema rather than by a test.
     covered = {f.table for f in kept}
-    return [f for f in candidates if f.group in wanted or f.table not in covered]
+    return [f for f in candidates
+            if f.group in wanted
+            or (f.table in joinable and f.table not in covered)]
 
 
 def build_payload_model(
