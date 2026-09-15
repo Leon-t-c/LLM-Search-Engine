@@ -188,6 +188,39 @@ def _build_provider(settings) -> Provider:
     raise ValueError(f"unknown provider {settings.provider!r}")
 
 
+def _configure_usage_log(path: str = "") -> None:
+    """Give the usage logger somewhere to write, because nothing else does.
+
+    `usage_log` records at INFO and had no handler. Uvicorn configures only
+    its own `uvicorn.*` loggers, so this one propagated to a bare root and
+    Python's last-resort handler dropped everything under WARNING. Every
+    usage record ever computed was handed to a logger and discarded --
+    while the comment above `usage_log` claimed each call left a line, and
+    that the log was the running cost record. It was inert for the whole of
+    phase 1, and the first real call's token counts went with it.
+
+    Configured here in the factory rather than at import, so that importing
+    this module still has no side effects, and `create_app` -- which the
+    tests drive with a fake provider -- gains no output.
+    """
+    if usage_log.handlers:
+        return
+    fmt = logging.Formatter("%(asctime)s %(message)s")
+    stream = logging.StreamHandler()
+    stream.setFormatter(fmt)
+    usage_log.addHandler(stream)
+    if path:
+        # Appended, never truncated: this file is an accumulating record,
+        # and a restart that wiped it would take the history with it.
+        file_handler = logging.FileHandler(path, encoding="utf-8")
+        file_handler.setFormatter(fmt)
+        usage_log.addHandler(file_handler)
+    usage_log.setLevel(logging.INFO)
+    # The root logger is someone else's to configure, and a second handler
+    # there would print every record twice.
+    usage_log.propagate = False
+
+
 def make_app() -> FastAPI:
     """The production app, built from settings.
 
@@ -201,6 +234,7 @@ def make_app() -> FastAPI:
         uvicorn cert_nlq.api.app:make_app --factory
     """
     settings = get_settings()
+    _configure_usage_log(settings.usage_log_path)
     return create_app(
         RegistryClient(settings.registry_url, settings.registry_token),
         _build_provider(settings),

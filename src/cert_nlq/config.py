@@ -31,6 +31,13 @@ class Settings(BaseSettings):
     #: something a scored run should inherit without saying so.
     claude_fallbacks: bool = False
 
+    #: Where to append the per-call usage records, in addition to stderr.
+    #: Blank means stderr only. Set it: terminal scrollback is not a cost
+    #: record, and these numbers are the baseline a later evaluation phase
+    #: compares against -- they cannot be reconstructed from the payload,
+    #: only from the provider's own billing page.
+    usage_log_path: str = ""
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -381,3 +381,33 @@ def test_the_claude_fallback_setting_reaches_the_adapter():
     )
     assert off._use_fallbacks is False
     assert on._use_fallbacks is True
+
+
+def test_the_usage_log_actually_emits(tmp_path):
+    """It did not, for the whole of phase 1.
+
+    `usage_log` records at INFO and had no handler; uvicorn configures only
+    its own loggers, so this one propagated to a bare root and Python's
+    last-resort handler dropped everything below WARNING. Every usage
+    record was computed, handed to a logger, and discarded -- while the
+    comment above `usage_log` described it as the running cost record.
+    Nothing failed, which is why it survived: a log that says nothing looks
+    exactly like a system that has not been called.
+    """
+    from cert_nlq.api.app import _configure_usage_log, _log_usage, usage_log
+
+    path = tmp_path / "usage.log"
+    saved = list(usage_log.handlers)
+    usage_log.handlers.clear()
+    try:
+        _configure_usage_log(str(path))
+        _log_usage({"schema_name": "route", "model": "m", "output_tokens": 7})
+        for handler in usage_log.handlers:
+            handler.flush()
+        written = path.read_text(encoding="utf-8")
+    finally:
+        for handler in usage_log.handlers:
+            handler.close()
+        usage_log.handlers[:] = saved
+    assert "schema_name" in written
+    assert "output_tokens" in written
