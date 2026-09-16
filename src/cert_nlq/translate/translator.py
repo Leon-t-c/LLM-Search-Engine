@@ -114,11 +114,23 @@ def _translate_stage_two(
 ) -> tuple[Payload | None, str]:
     """Call the model, retrying once with the validation error appended."""
     schema = json_schema_for(root, chosen.groups, chosen.joins)
+    # What the rows ARE. The schema names every field but nothing named the
+    # entity, and the second real call showed what that costs: asked about
+    # "Queens applications", the model went looking for an "applications"
+    # field, found none, and wrote its confusion into a value slot. Stage 1
+    # routes by this label; stage 2 had never seen it. Appended to the
+    # system text rather than the question so it joins the cached prefix,
+    # which already varies per root through the schema.
+    system = (
+        f"{TRANSLATOR_SYSTEM}\n"
+        f"The rows are: {root.label}. A word in the question that names the "
+        f"rows themselves is not a field and needs no condition."
+    )
     asked = question
     problem = ""
     for _ in range(_MAX_ATTEMPTS):
         raw = provider.complete(
-            system=TRANSLATOR_SYSTEM,
+            system=system,
             question=asked,
             schema=schema,
             schema_name=f"{root.root}Payload",

@@ -35,6 +35,26 @@ def test_the_prompt_sends_counting_to_the_aggregate_slot():
     assert "the caller counts the rows" not in TRANSLATOR_SYSTEM
 
 
+def test_stage_two_is_told_what_the_rows_are(registry):
+    """The schema names the fields; only the root's label names the entity.
+
+    The second real call proved the gap: asked about "Queens applications",
+    the model hunted for an "applications" field, found none, and wrote its
+    confusion into a value slot. Stage 1 routes by this label; stage 2 had
+    never seen it. Checked behaviourally through the fake's recorded call,
+    because the label is per-root and cannot sit in the static prompt.
+    """
+    provider = FakeProvider([
+        ROUTE,
+        {"root": "widget", "where": {"combinator": "AND",
+          "children": [{"field": "widget.region", "op": "=", "value": "N"}]}},
+    ])
+    translate("widgets up north", registry, provider, now_year=2026)
+    stage_two = provider.calls[-1]["system"]
+    assert "The rows are: Widgets" in stage_two
+    assert stage_two.startswith(TRANSLATOR_SYSTEM)
+
+
 def test_the_prompt_forbids_commentary_in_a_value():
     """`value` is the payload's only free-text slot, so it is the only
     place model commentary can land -- and on the first real call it did,
