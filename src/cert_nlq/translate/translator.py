@@ -32,7 +32,20 @@ TRANSLATOR_SYSTEM = (
     "values: `status in [A, B]` rather than a group of two equalities.\n"
     "For a value from a coded field, write the meaning in plain words; a later "
     "step maps it to the stored code. Do not guess a code.\n"
-    "Leave a name or address exactly as written, placeholders included.\n"
+    # The value-slot rule and the placeholder rewrite arrived together, from
+    # the first real provider call. `value` is the one free-text slot in the
+    # whole payload -- everything else is pinned by an enum -- so it is the
+    # only place commentary can land, and it landed: the model wrote
+    # "Queens placeholder? no. Need exact wording Queens." into a value,
+    # deliberating about the old phrasing "placeholders included". Telling
+    # it that unresolved values are asked about later gives uncertainty an
+    # out-of-band channel, so it has no reason to hedge in-band.
+    "A value is the value alone -- a word, number or date drawn from the "
+    "question. Never write reasoning, a note, or a question into a value. "
+    "When unsure, give your single best reading of the question's wording; "
+    "a value that does not resolve is asked about, not failed.\n"
+    "Copy a name or an address exactly as the question spells it, even when "
+    "it looks like a placeholder or a mistake.\n"
     "Counting, totalling and averaging belong in `aggregate`, never in a "
     "filter: how many is `aggregate: [{fn: count, field: *, as: total}]`.\n"
     "The remaining slots: `columns` names the fields to return, `group_by` "

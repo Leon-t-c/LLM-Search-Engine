@@ -35,6 +35,19 @@ def test_the_prompt_sends_counting_to_the_aggregate_slot():
     assert "the caller counts the rows" not in TRANSLATOR_SYSTEM
 
 
+def test_the_prompt_forbids_commentary_in_a_value():
+    """`value` is the payload's only free-text slot, so it is the only
+    place model commentary can land -- and on the first real call it did,
+    verbatim: "Queens placeholder? no. Need exact wording Queens." The
+    prompt must both forbid that and name the out-of-band channel that
+    makes hedging unnecessary. A tripwire like its neighbours, not a proof.
+    """
+    assert "Never write reasoning" in TRANSLATOR_SYSTEM
+    assert "asked about, not failed" in TRANSLATOR_SYSTEM
+    # The phrasing that provoked the deliberation must not return.
+    assert "placeholders included" not in TRANSLATOR_SYSTEM
+
+
 def test_the_prompt_states_the_rule_the_validator_enforces():
     """An empty payload is rejected downstream; say so before it is built."""
     assert "at least one condition" in TRANSLATOR_SYSTEM
