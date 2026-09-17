@@ -17,3 +17,9 @@ __pycache__/
 
 # SDD scratch (ledger, briefs, review packages)
 .superpowers/
+
+# Runtime artifacts. This repo is public and publishes no schema content:
+# a captured payload carries field keys and stored codes, and the usage log
+# accumulates locally and would churn every commit.
+smoke*.json
+usage.log
