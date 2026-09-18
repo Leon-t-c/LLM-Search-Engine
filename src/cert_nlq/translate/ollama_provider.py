@@ -75,6 +75,11 @@ class OllamaProvider:
             # The schema dict goes straight in: Ollama's structured-output
             # support takes a JSON Schema object here directly, not a
             # name/schema envelope like the OpenAI adapter builds.
+            # VERIFY-AT-SETUP: this bare shape is what the docs describe: no
+            # live server has compiled one of these through llama.cpp's real
+            # grammar converter in this environment. The schema fixpoint
+            # test (test_ollama_provider.py) only pins that the *keywords*
+            # stay inside the documented supported subset.
             "format": schema,
             "stream": False,
             # Qwen3's -instruct variant is non-thinking already, but this is
@@ -82,6 +87,9 @@ class OllamaProvider:
             # reasoning tokens land ahead of the JSON content and fight the
             # grammar `format` imposes, so thinking is turned off at the
             # request level rather than trusted to the tag name alone.
+            # VERIFY-AT-SETUP: this key is a recent Ollama addition; an
+            # older server may ignore it silently or reject it as unknown.
+            # No live server exercised this in this environment.
             "think": False,
             "options": {"temperature": 0},
         }
@@ -143,6 +151,12 @@ class OllamaProvider:
             return
         if not isinstance(body, dict):
             return
+        # VERIFY-AT-SETUP: "prompt_eval_count"/"eval_count" are the field
+        # names Ollama's docs give for a non-streamed /api/chat response;
+        # no live server has confirmed them in this environment. If a real
+        # run's usage log shows these at zero on every call, the names (or
+        # this being a streamed response after all) drifted -- check the
+        # raw response body and fix the keys read here.
         record = {
             "schema_name": schema_name,
             "model": body.get("model") or self._model,

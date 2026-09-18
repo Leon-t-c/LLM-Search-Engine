@@ -285,3 +285,29 @@ for the body shape) or by pointing the eval harness's `--limit 1` at it. The
 first call is the slow one — model load into VRAM happens then, inside the
 adapter's 300 s timeout (see `PROVIDER_TIMEOUT` in
 `translate/ollama_provider.py`) — every call after it should be fast.
+
+**6. Verify on first run.** Three details of the Ollama request/response
+shape were written from documentation, not confirmed against a running
+server in the environment this adapter was built in — the smoke call above
+is the first time they're actually checked. Each has a distinct failure
+signature to watch for:
+
+- **`"think": false`** (`translate/ollama_provider.py`, the request body):
+  a server predating this field may ignore it silently, or reject the
+  whole call as an unknown-parameter error. If the smoke call fails
+  outright with a parameter-shaped complaint, try the call again with that
+  key removed to confirm it's the cause, then update Ollama or drop the key
+  for this tag.
+- **`"format": <schema dict>`** sent bare, with no name/strict wrapper: if
+  the smoke call returns a 400, or `message.content` comes back as
+  something other than the requested JSON shape, the installed Ollama's
+  `json_schema_to_grammar` disagrees with the schema `strictify` produces —
+  check the response body directly rather than assuming the adapter's
+  request-building is at fault (the schema fixpoint test already pins that
+  the schema itself uses only the documented supported keywords).
+- **`prompt_eval_count` / `eval_count`** as the usage field names
+  (`_report_usage`): if the run's usage log (or `/translate`'s response
+  `"usage"` field) shows `uncached_input_tokens`/`output_tokens` at zero on
+  every call despite the translation itself succeeding, the field names
+  drifted or the response came back streamed after all — inspect the raw
+  `/api/chat` body and fix the keys `_report_usage` reads.
