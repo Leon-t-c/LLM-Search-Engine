@@ -269,6 +269,14 @@ def _build_provider(settings) -> Provider:
             router_model=settings.router_model or None,
             on_usage=_log_usage,
         )
+    if settings.provider == "ollama":
+        from ..translate.ollama_provider import OllamaProvider
+
+        return OllamaProvider(
+            settings.ollama_url,
+            settings.ollama_model,
+            on_usage=_log_usage,
+        )
     # Not a ProviderError: no provider failed, none was even constructed.
     # The settings type closes this branch off before it can be reached,
     # which is the point — it is here for the case that type is widened.
@@ -328,14 +336,17 @@ def make_app() -> FastAPI:
         settings.service_token,
         provider_name=settings.provider,
         # The model this deploy actually calls, not the field named `model`:
-        # the Claude adapter is configured through `claude_model` and leaves
-        # `model` blank, so reporting `model` would tell a run it was served
-        # by "" while it was billed for an Opus. `_build_provider` makes this
-        # same choice one branch at a time; it is repeated rather than
-        # returned because a health probe must not construct a provider.
+        # the Claude adapter is configured through `claude_model` and the
+        # Ollama one through `ollama_model`, both leaving `model` blank, so
+        # reporting `model` unconditionally would tell a run it was served by
+        # "" while it was billed for an Opus, or free on a local GPU that
+        # §12a's spend gate has to be able to tell apart from a billed run —
+        # see healthz's `provider` field for that half. `_build_provider`
+        # makes this same choice one branch at a time; it is repeated rather
+        # than returned because a health probe must not construct a provider.
         model=(
-            settings.claude_model
-            if settings.provider == "claude"
+            settings.claude_model if settings.provider == "claude"
+            else settings.ollama_model if settings.provider == "ollama"
             else settings.model
         ),
         # Blank means "stage 1 used `model`" — reported as configured rather

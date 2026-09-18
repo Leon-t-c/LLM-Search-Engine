@@ -203,3 +203,85 @@ it could be, so the questions that probe the unpublished refund / billing /
 income-and-expense tables (`gold-0059` .. `gold-0061`) expect
 `field_not_in_schema`, which is what the service actually and correctly
 returns. Each carries a `note` saying so.
+
+## Running against a self-hosted Ollama model
+
+This is owner setup — nothing an agent can do, because it means installing
+software and pulling a multi-gigabyte file onto this machine. It exists so
+the eval harness can run for free against a third, open-weights provider
+alongside the two paid ones (spec §15's re-targeted 1b), on the one GPU this
+project actually has: a GTX 970, 4 GB VRAM, compute capability 5.2.
+
+**1. Install.** Get Ollama for Windows from https://ollama.com/download and
+run the installer. It installs as a background service, listening on
+`127.0.0.1:11434` by default — nothing here talks to any other host.
+
+**2. Pull a model.**
+
+```
+ollama pull qwen3:4b-instruct-2507
+```
+
+The tag above is what was current when this was written; **tags drift**, so
+before relying on it, check what actually landed:
+
+```
+ollama list
+```
+
+and use whatever tag shows up there for `CERT_NLQ_OLLAMA_MODEL` below, not
+the one in this doc if the two disagree.
+
+**Why this model.** The GPU's compute capability (5.2) clears Ollama's floor
+(5.0) — it is supported, just old. 4 GB of VRAM is the binding constraint:
+**Qwen3-4B-Instruct-2507 at its default Q4 quantisation is about 2.6 GB**,
+which leaves headroom for the KV cache a ~4–5K-token schema-heavy prompt
+needs, so the whole forward pass — prefill included — stays on the GPU. An
+8B model would not fit alongside that headroom, would split across CPU and
+GPU, and prefill (the expensive side of this workload, since the schema
+dominates the prompt) would crawl. And specifically the **-Instruct-2507**
+(non-thinking) variant, not a `-Thinking` tag: reasoning tokens are emitted
+before the JSON content and fight the grammar that `format` imposes on the
+response, which is a good way to watch a structured-output call time out or
+truncate for no reason connected to the question being asked.
+
+**3. Configure a second env file.** The running `cert-nlq` process most
+likely already has a paid provider configured in `.env` — do not overwrite
+that file. Put the Ollama configuration somewhere else, e.g.
+`.env.ollama` (gitignored the same way `.env` is), or export the variables
+directly in the shell that starts this run:
+
+```
+CERT_NLQ_PROVIDER=ollama
+CERT_NLQ_OLLAMA_URL=http://127.0.0.1:11434
+CERT_NLQ_OLLAMA_MODEL=qwen3:4b-instruct-2507   # the tag from `ollama list`
+```
+
+`pydantic-settings` reads `.env` by name, not by convention, so pointing a
+run at the second file means telling whatever starts the process to load it
+in place of `.env` — the point is that starting an Ollama-backed run must
+never be "edit `.env`, run it, remember to edit it back."
+
+**4. Restart and verify.** Restart the `cert-nlq` service under that
+configuration, then:
+
+```
+curl http://127.0.0.1:8000/healthz
+```
+
+The body's `"provider"` field must read `"ollama"` — that exact string is
+what un-gates §12a's spend controls for this run (see `_log_usage` /
+`_build_provider` in `api/app.py`): an eval run against this provider is
+free, and the harness is allowed to know that only because `/healthz` says
+so honestly. If it still says `"openai"` or `"claude"`, the process picked
+up the wrong env file, not this one.
+
+**5. One free smoke call.** `scripts/check_registry.py` makes no model call
+by itself (see its own docstring) — it is a check of the registry and the
+generated schema, not of the provider. To exercise the Ollama path itself
+for the first time, run one real translation through the running service,
+either with a manual `POST /translate` (see `api/app.py::TranslateRequest`
+for the body shape) or by pointing the eval harness's `--limit 1` at it. The
+first call is the slow one — model load into VRAM happens then, inside the
+adapter's 300 s timeout (see `PROVIDER_TIMEOUT` in
+`translate/ollama_provider.py`) — every call after it should be fast.

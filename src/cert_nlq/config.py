@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     #: Which translator backend to build. Closed, so a near miss — a capital
     #: letter, a trailing space — fails at boot with a settings error naming
     #: the field, rather than surviving until something deeper cannot place it.
-    provider: Literal["openai", "claude"] = "openai"
+    provider: Literal["openai", "claude", "ollama"] = "openai"
     anthropic_api_key: str = ""
     claude_model: str = "claude-opus-5"
     #: Let the platform answer with a substitute model when the requested one
@@ -30,6 +30,15 @@ class Settings(BaseSettings):
     #: turning it on is a deliberate availability decision for one deploy, not
     #: something a scored run should inherit without saying so.
     claude_fallbacks: bool = False
+
+    #: Local server, not a hosted endpoint — no key belongs beside it. The
+    #: default points at Ollama's own default bind address, so a deploy that
+    #: only sets `CERT_NLQ_PROVIDER=ollama` and a model tag still works.
+    ollama_url: str = "http://127.0.0.1:11434"
+    #: No default: unlike the vendor adapters, there is no house model to
+    #: fall back to here — the tag depends on what was `ollama pull`ed on
+    #: this box, and drifts. Blank fails at construction like the others.
+    ollama_model: str = ""
 
     #: Where to append the per-call usage records, in addition to stderr.
     #: Blank means stderr only. Set it: terminal scrollback is not a cost
