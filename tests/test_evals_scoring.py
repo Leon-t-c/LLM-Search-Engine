@@ -4,6 +4,9 @@ Every case here builds a `GoldenCase` directly (skipping `load_golden`'s
 registry cross-checks, which are Task 2's concern) and an `Outcome` by hand,
 so each test isolates exactly the one scoring rule it is about.
 """
+import pytest
+from pydantic import ValidationError
+
 from cert_nlq.evals.golden import GoldenCase
 from cert_nlq.evals.scoring import Outcome, canonical, score
 
@@ -460,3 +463,159 @@ def test_groups_recall_hit_none_when_gold_has_no_condition_fields(registry):
     outcome = _outcome(status="ok", payload=actual_payload)
     row = score(case, outcome, root)
     assert row.groups_recall_hit is None
+
+
+def test_groups_recall_hit_covers_aggregate_only_gold_fields(registry):
+    """§11 says gold *fields*, not gold condition fields -- an aggregate-only
+    gold case naming a real field (not `*`) must not be silently excluded
+    from the denominator just because it has no `where`."""
+    root = registry.root("widget")
+    gold_payload = {
+        "root": "widget",
+        "aggregate": [{"fn": "sum", "field": "widget.price", "as": "total"}],
+    }
+    # widget.shipped shares widget.price's "Commercial" group.
+    actual_payload = {"root": "widget", "where": _and(_cond("widget.shipped", ">", "2024-01-01"))}
+    case = _ok_case("g-grp-4", gold_payload, tags=("aggregate",))
+    outcome = _outcome(status="ok", payload=actual_payload)
+    row = score(case, outcome, root)
+    assert row.groups_recall_hit is True
+
+
+# --------------------------------------------------------------------------
+# fix-up round: alias-key robustness, Outcome vocabulary, exact_match gating,
+# value multisets
+# --------------------------------------------------------------------------
+
+
+def test_canonical_accepts_the_alias_spelling_a_plain_model_dump_would_emit(registry):
+    """`Aggregate.alias` serialises as `"as"` only with `by_alias=True`; a
+    runner doing a plain `model_dump()` emits `"alias"` instead. Both must
+    normalise the same way, including through a having reference."""
+    root = registry.root("widget")
+    as_spelled = {
+        "root": "widget",
+        "aggregate": [{"fn": "count", "field": "*", "as": "n"}],
+        "having": [{"agg": "n", "op": ">", "value": 5}],
+    }
+    alias_spelled = {
+        "root": "widget",
+        "aggregate": [{"fn": "count", "field": "*", "alias": "cnt"}],
+        "having": [{"agg": "cnt", "op": ">", "value": 5}],
+    }
+    assert canonical(as_spelled, root) == canonical(alias_spelled, root)
+
+
+def test_canonical_prefers_as_when_both_spellings_present_and_agree(registry):
+    root = registry.root("widget")
+    both_agreeing = {
+        "root": "widget",
+        "aggregate": [{"fn": "count", "field": "*", "as": "n", "alias": "n"}],
+        "having": [{"agg": "n", "op": ">", "value": 5}],
+    }
+    as_only = {
+        "root": "widget",
+        "aggregate": [{"fn": "count", "field": "*", "as": "n"}],
+        "having": [{"agg": "n", "op": ">", "value": 5}],
+    }
+    assert canonical(both_agreeing, root) == canonical(as_only, root)
+
+
+def test_canonical_treats_conflicting_alias_spellings_as_garbage_not_a_guess(registry):
+    root = registry.root("widget")
+    conflicting = {
+        "root": "widget",
+        "aggregate": [{"fn": "count", "field": "*", "as": "n", "alias": "m"}],
+    }
+    # Self-consistent: the exact same garbage compares equal to itself.
+    assert canonical(conflicting, root) == canonical(conflicting, root)
+    # But it must not spuriously match a clean, differently-shaped aggregate.
+    clean = {"root": "widget", "aggregate": [{"fn": "count", "field": "*", "as": "n"}]}
+    assert canonical(conflicting, root) != canonical(clean, root)
+
+
+def test_outcome_rejects_the_wires_own_status_vocabulary():
+    """`"refused"`/`"needs_clarification"` are the wire's spellings, not
+    `Outcome`'s -- constructing one with them must fail loudly rather than
+    silently reading as a wrong-forever refusal-reason comparison."""
+    with pytest.raises(ValidationError):
+        Outcome(status="refused")
+    with pytest.raises(ValidationError):
+        Outcome(status="needs_clarification")
+
+
+def test_exact_match_is_false_when_a_clarify_payload_coincidentally_canonicalises_equal(
+    registry,
+):
+    root = registry.root("widget")
+    where = _and(_cond("widget.status", "=", "A"))
+    gold_payload = {"root": "widget", "where": where}
+    case = _ok_case("g-clarify-payload", gold_payload)
+    # The service's pruned needs_clarification payload happens to match gold
+    # canonically, but the status is "clarify", not "ok".
+    outcome = _outcome(status="clarify", payload={"root": "widget", "where": where})
+    row = score(case, outcome, root)
+    assert row.exact_match is False
+    assert row.field_tp == 0
+
+
+def test_values_correct_treats_repeated_field_op_as_a_multiset(registry):
+    """`price > 100 OR price > 500` on both sides, values swapped in
+    writing order, must still score as a full value match."""
+    root = registry.root("widget")
+    gold_payload = {
+        "root": "widget",
+        "where": {
+            "combinator": "OR",
+            "children": [
+                _cond("widget.price", ">", 100),
+                _cond("widget.price", ">", 500),
+            ],
+        },
+    }
+    actual_payload = {
+        "root": "widget",
+        "where": {
+            "combinator": "OR",
+            "children": [
+                _cond("widget.price", ">", 500),
+                _cond("widget.price", ">", 100),
+            ],
+        },
+    }
+    case = _ok_case("g-multiset", gold_payload)
+    outcome = _outcome(status="ok", payload=actual_payload)
+    row = score(case, outcome, root)
+    assert row.values_total == 1  # one matched (field, op) pair
+    assert row.values_correct == 1
+
+
+def test_values_correct_catches_a_dropped_duplicate(registry):
+    """Same (field, op) pair, but the actual side dropped one of the two
+    values -- the multiset compare must catch that as incorrect."""
+    root = registry.root("widget")
+    gold_payload = {
+        "root": "widget",
+        "where": {
+            "combinator": "OR",
+            "children": [
+                _cond("widget.price", ">", 100),
+                _cond("widget.price", ">", 500),
+            ],
+        },
+    }
+    actual_payload = {
+        "root": "widget",
+        "where": {
+            "combinator": "OR",
+            "children": [
+                _cond("widget.price", ">", 100),
+                _cond("widget.price", ">", 100),
+            ],
+        },
+    }
+    case = _ok_case("g-multiset-2", gold_payload)
+    outcome = _outcome(status="ok", payload=actual_payload)
+    row = score(case, outcome, root)
+    assert row.values_total == 1
+    assert row.values_correct == 0

@@ -5,18 +5,18 @@ absent service response (a timeout, a 502) must still produce a row, because
 the alternative is an eval run that stops at the first flaky call instead of
 recording it as one.
 
-`Outcome` is this module's own vocabulary, not the wire's. The three response
-shapes on the wire are `ok` / `needs_clarification` / `refused`
-(`ir.response`), but the future runner that builds an `Outcome` is free to
-normalise `status` onto the *golden set's* vocabulary instead --
-`"ok"` / `"clarify"` / `"refusal"` / `None` (on a transport failure) -- which
-is what this module assumes. That makes `status_expected == status_actual` a
-plain string compare with no separate translation table to keep in sync
-between the two vocabularies. See the report for why this is a choice and not
-a given.
+`Outcome` is this module's own vocabulary, not the wire's -- see its
+docstring for the mapping a runner must apply before constructing one. Making
+that vocabulary a `Literal` means the wrong one (the wire's own strings)
+cannot be constructed in the first place, rather than silently comparing
+false forever.
 """
 import json
+from collections import Counter
 from dataclasses import dataclass
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict
 
 from ..registry.models import FieldSpec, RootSpec
 from ..translate.values import resolve_money
@@ -30,9 +30,26 @@ from .golden import GoldenCase
 _INPUT_USAGE_KEYS = ("uncached_input_tokens", "cached_input_tokens", "cache_write_tokens")
 
 
-@dataclass(frozen=True, slots=True)
-class Outcome:
+class Outcome(BaseModel):
     """What one replayed question got back, flattened for scoring.
+
+    `status` is the golden set's vocabulary (`GoldenCase.expect.kind`), not
+    the wire's (`ir.response`) -- a runner must translate before
+    constructing one:
+
+    | wire (`ir.response`)              | `Outcome.status` |
+    |------------------------------------|------------------|
+    | `Ok.status` (`"ok"`)               | `"ok"`           |
+    | `NeedsClarification.status`        | `"clarify"`      |
+    | (`"needs_clarification"`)          |                  |
+    | `Refused.status` (`"refused"`)     | `"refusal"`      |
+    | transport failure (timeout, 502)   | `None`, with `error` set |
+
+    This is a `Literal`, not a bare `str`, so passing the wire's own
+    `"refused"` raises at construction instead of silently comparing false
+    against `status_actual == "refusal"` forever -- the trap being guarded
+    against is a runner that skips the translation and gets a scoring run
+    that reports 0% refusal accuracy with no exception anywhere.
 
     `error` set means the HTTP call itself failed (a timeout, a 502) --
     everything else is `None`/empty in that case, and `score` must still
@@ -41,7 +58,9 @@ class Outcome:
     scoring, only cost that case its credit.
     """
 
-    status: str | None = None
+    model_config = ConfigDict(frozen=True)
+
+    status: Literal["ok", "clarify", "refusal"] | None = None
     payload: dict | None = None
     reason: str | None = None
     candidates: tuple[dict, ...] = ()
@@ -55,6 +74,18 @@ class Row:
     """One flat measurement record. `None` means "not applicable to this
     case's kind", not "zero" -- a clarify case has no `field_tp`, an ok case
     always has one (possibly `0`).
+
+    A row built from an `error` `Outcome` (the HTTP call itself failed) is
+    not distinguished from a genuine model miss anywhere in this record --
+    by design, it scores `root_correct=False`, `field_fn=len(gold fields)`,
+    `exact_match=False`, and so on, the same as a real wrong answer would.
+    That is deliberate here (the alternative is a third value on every
+    boolean/count field, for a condition -- infra flakiness -- that a
+    caller can already detect for free): `error` is carried on the row
+    specifically so a caller can filter `error is not None` out before
+    computing accuracy, and report those rows separately. An aggregator
+    that skips this filter will silently fold transport failures into the
+    model's own error rate.
     """
 
     case_id: str
@@ -107,7 +138,14 @@ def canonical(payload: dict, root: RootSpec) -> str:
        rewritten to a positional token (`agg0`, `agg1`, ...); every
        `having.agg` and `sort.agg` reference is rewritten through the same
        mapping. Two payloads identical up to alias spelling and aggregate
-       order compare equal.
+       order compare equal. Both wire spellings of the alias are accepted on
+       an aggregate dict -- `"as"` (`Aggregate`'s wire alias) and `"alias"`
+       (its Python attribute name, which a runner's plain `model_dump()`
+       without `by_alias=True` would emit) -- preferring `"as"` when both are
+       present and agree. Present-and-different is treated as garbage this
+       function refuses to guess between: that aggregate is compared by its
+       literal `as`/`alias` values instead of being folded into the
+       positional-token scheme.
     3. **`AND`/`OR` children are sorted by their own canonical form.** A
        combinator is commutative -- `A AND B` is `B AND A` -- so order at
        that level is not semantic, and comparing children positionally would
@@ -229,6 +267,33 @@ def _as_money(value):
     return amount if amount is not None else value
 
 
+def _aggregate_alias(item: dict) -> tuple[str | None, bool]:
+    """The alias an aggregate dict names, tolerant of both wire spellings.
+
+    `Aggregate.alias` serialises as `"as"` (`model_dump(by_alias=True)`) but
+    a runner doing a plain `model_dump()` emits the Python attribute name,
+    `"alias"`, instead. Accepting only one spelling would leave the alias
+    map empty for the other, silently failing every alias/having/sort
+    rewrite for that payload with no exception anywhere -- so both are read
+    here, preferring `"as"` when both are present and agree.
+
+    Returns `(alias, is_garbage)`: `is_garbage` is true only when both keys
+    are present and disagree, which this function has no principled way to
+    resolve -- the caller falls back to comparing that aggregate literally
+    rather than guessing.
+    """
+    as_value, alias_value = item.get("as"), item.get("alias")
+    as_ok = isinstance(as_value, str)
+    alias_ok = isinstance(alias_value, str)
+    if as_ok and alias_ok:
+        return (as_value, False) if as_value == alias_value else (None, True)
+    if as_ok:
+        return as_value, False
+    if alias_ok:
+        return alias_value, False
+    return None, False
+
+
 def _canon_aggregate_list(agg_list):
     """Sort aggregates into a canonical `(fn, field)` order and map each
     alias to a positional token `agg0`, `agg1`, ... in that order.
@@ -238,11 +303,15 @@ def _canon_aggregate_list(agg_list):
     alias_map: dict[str, str] = {}
     canon = []
     for index, item in enumerate(items):
+        base = {"fn": item.get("fn"), "field": item.get("field")}
+        alias, is_garbage = _aggregate_alias(item)
+        if is_garbage:
+            canon.append({**base, "as": item.get("as"), "alias": item.get("alias")})
+            continue
         token = f"agg{index}"
-        old_alias = item.get("as")
-        if isinstance(old_alias, str):
-            alias_map[old_alias] = token
-        canon.append({"fn": item.get("fn"), "field": item.get("field"), "as": token})
+        if alias is not None:
+            alias_map[alias] = token
+        canon.append({**base, "as": token})
     return canon, alias_map
 
 
@@ -327,8 +396,19 @@ def _field_ops(payload: dict | None) -> dict[str, set[str]]:
     return result
 
 
-def _field_op_values(payload: dict | None, root: RootSpec) -> dict[tuple[str, str], tuple]:
-    result: dict[tuple[str, str], tuple] = {}
+def _field_op_values(
+    payload: dict | None, root: RootSpec
+) -> dict[tuple[str, str], list[tuple]]:
+    """Every `(field, op)` pair's coerced `(value, value2)` tuples.
+
+    A list per pair, not a single value: the same field can carry the same
+    operator more than once (`price > 100 OR price > 500`), and collapsing
+    to the last-written condition would silently drop one of them from
+    value scoring. `score` compares these as multisets (`Counter`), so
+    `[100.0, 500.0]` matches regardless of which condition was written
+    first on either side.
+    """
+    result: dict[tuple[str, str], list[tuple]] = {}
     if not isinstance(payload, dict):
         return result
     for c in _iter_condition_dicts(payload.get("where")):
@@ -338,10 +418,11 @@ def _field_op_values(payload: dict | None, root: RootSpec) -> dict[tuple[str, st
         spec = root.fields_by_key.get(field)
         value = _coerce_value(c.get("value"), spec)
         value2 = _coerce_value(c.get("value2"), spec)
-        result[(field, op)] = (
+        pair = (
             tuple(value) if isinstance(value, list) else value,
             tuple(value2) if isinstance(value2, list) else value2,
         )
+        result.setdefault((field, op), []).append(pair)
     return result
 
 
@@ -374,20 +455,22 @@ def _groups_recall_hit(
 
     The service does not echo which groups it routed to -- only the payload
     it produced -- so this cannot measure group selection directly. Instead:
-    a gold condition field counts as reached if it appears anywhere in the
-    actual payload, *or* if some field the actual payload does mention sits
-    in the same registry group. That second clause is the proxy, and it is
-    optimistic on purpose: it cannot tell "the group was selected but this
-    field was dropped" apart from "the group was never selected and another
-    field from a different, coincidentally-matching, group happened to be
-    used" -- it only ever produces a hit or a documented non-hit, never
-    proof. Treat a `True` here as "consistent with a correct route", not as
-    "the route was verified correct". A later addition -- the service
-    optionally echoing its selected groups -- would let this be replaced with
-    an exact measurement; that is not built here.
+    a gold field (every field the gold payload names at all -- conditions,
+    aggregates, `group_by`, `sort`, not just conditions) counts as reached if
+    it appears anywhere in the actual payload, *or* if some field the actual
+    payload does mention sits in the same registry group. That second clause
+    is the proxy, and it is optimistic on purpose: it cannot tell "the group
+    was selected but this field was dropped" apart from "the group was never
+    selected and another field from a different, coincidentally-matching,
+    group happened to be used" -- it only ever produces a hit or a documented
+    non-hit, never proof. Treat a `True` here as "consistent with a correct
+    route", not as "the route was verified correct". A later addition -- the
+    service optionally echoing its selected groups -- would let this be
+    replaced with an exact measurement; that is not built here.
 
-    Returns `None` when there is nothing to derive it from: no gold
-    condition fields to check (an aggregate-only query with no `where`).
+    Returns `None` when there is nothing to derive it from: the gold payload
+    names no field at all (an aggregate-only `count(*)` with no `where`,
+    `group_by`, or `sort` field).
     """
     if not gold_fields:
         return None
@@ -471,10 +554,22 @@ def score(case: GoldenCase, outcome: Outcome, root: RootSpec) -> Row:
         actual_vals = _field_op_values(actual_payload, root)
         matched_pairs = set(gold_vals) & set(actual_vals) if root_correct else set()
         values_total = len(matched_pairs)
-        values_correct = sum(1 for p in matched_pairs if gold_vals[p] == actual_vals[p])
+        values_correct = sum(
+            1
+            for p in matched_pairs
+            if Counter(gold_vals[p]) == Counter(actual_vals[p])
+        )
 
-        exact_match = _exact_match(gold_payload, actual_payload, root)
-        groups_recall_hit = _groups_recall_hit(gold_fields, actual_payload, root)
+        # Gated on status_actual == "ok" (not just root_correct or a bare
+        # canonical compare): a clarify response's pruned payload can
+        # canonicalise identically to gold by coincidence, and that must not
+        # read as an exact match sitting beside field_tp=0.
+        exact_match = status_actual == "ok" and _exact_match(
+            gold_payload, actual_payload, root
+        )
+        groups_recall_hit = _groups_recall_hit(
+            _all_touched_fields(gold_payload), actual_payload, root
+        )
 
     elif kind == "clarify":
         clarify_field_expected = case.expect.field
