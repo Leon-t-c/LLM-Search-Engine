@@ -30,6 +30,12 @@ only durable input is this file.
 | `clarify` | `field` | the field whose vocabulary should come back as candidates |
 | `refusal` | `reason` | one of the four closed reasons in `translate/refusals.py` |
 
+A case may also carry an optional `"note"`: one sentence saying why the
+expectation is what it is, for the cases where the correct answer is not the
+one a reader would first assume. It lives on the case rather than in a review
+document, so anyone "fixing" the expectation back to the obvious one has to
+delete the sentence explaining why the obvious one is wrong.
+
 `load_golden(path, registry)` in `cert_nlq.evals.golden` reads the file and
 checks every case against a registry — an `ok` payload goes through the same
 `validate_payload` gate the service itself must pass — reporting *all* problems
@@ -75,6 +81,16 @@ one does not. The slices partition the set, so a per-slice report adds up.
 | `join` | a field on `cityproperty` (City Data) or `managers` (Manager) |
 | `clarify` | a value that cannot resolve on a field that *has* a vocabulary |
 | `refusal:<reason>` | one of the four closed refusal reasons |
+
+`refusal:join_not_available` has **no cases, deliberately**. That reason exists
+in the shared vocabulary because the host can reach a join this service cannot
+see, but `translate/refusals.py` says in its own docstring that this service
+never constructs it -- the router drops an unavailable join rather than
+refusing. An outcome this service cannot produce must not have a slice
+pretending to measure it, so the three questions that probe the unpublished
+refund / billing / income-and-expense tables (`gold-0059` .. `gold-0061`) expect
+`field_not_in_schema`, which is what the service actually and correctly
+returns. Each carries a `note` saying so.
 
 Borough is treated as `selection` rather than `values` even though it is a
 coded field: it appears in most questions as an identity filter, and tagging on

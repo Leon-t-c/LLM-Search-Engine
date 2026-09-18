@@ -217,3 +217,15 @@ def test_a_case_missing_its_expectation_is_reported_by_id(tmp_path, registry):
     )
     with pytest.raises(GoldenError, match="g-070"):
         load_golden(path, registry)
+
+
+def test_a_case_can_carry_a_note(tmp_path, registry):
+    """A note is for an expectation whose *correctness* is surprising -- it
+    travels on the case, so editing the expectation back to the obvious answer
+    means deleting the sentence explaining why the obvious answer is wrong."""
+    cases = load_golden(
+        _write(tmp_path, _case(note="the obvious reading is wrong because ...")),
+        registry,
+    )
+    assert cases[0].note == "the obvious reading is wrong because ..."
+    assert load_golden(_write(tmp_path, _case()), registry)[0].note is None

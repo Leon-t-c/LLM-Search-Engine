@@ -91,6 +91,12 @@ class GoldenCase(BaseModel):
     question: str
     tags: tuple[str, ...] = ()
     expect: Expectation
+    #: Why this case expects what it expects, when the answer is not the one a
+    #: reader would first assume. Carried on the case rather than left in a
+    #: review document because the surprise belongs next to the line that
+    #: surprises -- a reader who edits the expectation back to the "obvious"
+    #: one has to delete the sentence saying why it is not.
+    note: str | None = None
 
 
 class GoldenError(ValueError):
