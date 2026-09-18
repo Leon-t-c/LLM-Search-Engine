@@ -740,3 +740,36 @@ def test_source_paraphrase_and_paraphrase_of_must_go_together(tmp_path, registry
         GoldenCase.model_validate(_case("g-106", source="paraphrase"))
     with pytest.raises(ValidationError, match="paraphrase"):
         GoldenCase.model_validate(_case("g-107", paraphrase_of="g-106"))
+
+
+def test_a_comma_after_a_number_is_punctuation_not_part_of_it(tmp_path, registry):
+    """"...in 2024, most common first" reworded to "...in 2024 with the most
+    common first" keeps the number. Matching greedily through the comma would
+    demand the paraphrase keep the punctuation too, and fail a rewording that
+    only moved the clause."""
+    cases = load_golden(
+        _write(
+            tmp_path,
+            _case("g-110", question="widget counts in 2024, most common first"),
+            _paraphrase(
+                "g-110-p1", "g-110", "most common first: widget counts in 2024"
+            ),
+        ),
+        registry,
+    )
+    assert len(cases) == 2
+
+
+def test_a_grouped_amounts_commas_are_part_of_the_number(tmp_path, registry):
+    """The other half of the same rule: `$5,000,000` is one token, and a
+    paraphrase that rounds it to "5 million" has changed the query."""
+    with pytest.raises(GoldenError) as exc:
+        load_golden(
+            _write(
+                tmp_path,
+                _case("g-111", question="widgets over $5,000,000"),
+                _paraphrase("g-111-p1", "g-111", "widgets over 5 million"),
+            ),
+            registry,
+        )
+    assert "5,000,000" in str(exc.value)

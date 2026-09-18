@@ -74,7 +74,11 @@ AUX_TAGS = frozenset({"review", "regression", "ambiguous-wording"})
 #: Numbers, years and code-shaped literals in a question. The paraphrase
 #: guard requires every one of these to survive a rewording verbatim -- see
 #: `_check_paraphrases`.
-_NUMBER_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
+#: A comma is part of a number only between digit groups -- `$5,000,000` is
+#: one token, while the comma in "tax year 2024, most common first" is
+#: punctuation. Matching greedily through it would demand the paraphrase
+#: keep the comma too, failing a rewording that moved the clause.
+_NUMBER_RE = re.compile(r"\d+(?:,\d{3})*(?:\.\d+)?")
 _CODE_RE = re.compile(r"<[^<>\s]+>|\b[A-Za-z]+-\d+\b|\"[^\"]+\"|'[^']+'")
 
 #: The slots a payload actually has. `Payload` ignores anything else -- the
