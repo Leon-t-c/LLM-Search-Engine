@@ -38,6 +38,31 @@ class Settings(BaseSettings):
     #: only from the provider's own billing page.
     usage_log_path: str = ""
 
+    #: The deployed `/translate` service the eval harness replays the golden
+    #: set against. A separate host from `registry_url` on purpose -- the
+    #: harness is an HTTP *client* of this service, never the service itself,
+    #: even when both happen to run on the same box during development.
+    eval_service_url: str = ""
+    #: Bearer token for `eval_service_url`'s own `service_token` gate --
+    #: distinct from `service_token` above (that one is *this* process's
+    #: inbound gate, when this process is serving `/translate`; this one is
+    #: the credential the harness presents as a caller of some other
+    #: instance).
+    eval_service_token: str = ""
+    #: The golden set the harness replays. Relative to the working directory
+    #: the CLI is run from -- `eval_data/` is gitignored except the golden
+    #: file itself (see the repo's `.gitignore` comment).
+    eval_golden_path: str = "eval_data/golden.jsonl"
+    #: Where recorded runs and rows are stored. sqlite; `open_store` builds
+    #: the URL.
+    eval_db_path: str = "eval_data/evals.db"
+    #: How many `/translate` calls the runner holds in flight at once. Not a
+    #: knob for the provider's own rate limit alone -- it is also part of a
+    #: run's identity (`store.RunRecord.concurrency`), because the report's
+    #: p95 latency depends on it (spec §11: fan-out latency is not user
+    #: latency).
+    eval_concurrency: int = 4
+
 
 @lru_cache
 def get_settings() -> Settings:
