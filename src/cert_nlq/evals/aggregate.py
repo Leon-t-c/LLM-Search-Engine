@@ -166,14 +166,20 @@ def _groups_recall(rows: Sequence[Row], source: str) -> Metric:
 def _field_pr(rows: Sequence[Row]) -> tuple[Metric, Metric]:
     """Micro over rows where `root_correct is True` -- an ok case that
     routed to the wrong root, or didn't route at all, contributes nothing
-    to the headline number (it is already reflected in root accuracy)."""
+    to the headline number (it is already reflected in root accuracy).
+
+    A root-correct, pure-aggregate row (no gold condition field at all,
+    e.g. a bare `count(*)`) has `field_tp = field_fp = field_fn = 0` --
+    `scoring.score` sets all three together, never one without the others
+    -- so it contributes `(0, 0)` to both ratios: no phantom true positive,
+    no phantom miss. `measured` already guarantees `field_tp is not None`,
+    and `score()` guarantees `field_fp`/`field_fn` are not `None` whenever
+    `field_tp` isn't, so no `or 0` coercion is needed here -- a future
+    change that breaks that invariant should raise, not silently score a
+    `None` as zero."""
     measured = [r for r in rows if r.root_correct is True and r.field_tp is not None]
-    precision = _sum_ratio(
-        (r.field_tp, (r.field_tp or 0) + (r.field_fp or 0)) for r in measured
-    )
-    recall = _sum_ratio(
-        (r.field_tp, (r.field_tp or 0) + (r.field_fn or 0)) for r in measured
-    )
+    precision = _sum_ratio((r.field_tp, r.field_tp + r.field_fp) for r in measured)
+    recall = _sum_ratio((r.field_tp, r.field_tp + r.field_fn) for r in measured)
     return precision, recall
 
 
@@ -339,9 +345,11 @@ def aggregate(
 
     Rows join to cases by `case_id`; a row whose `case_id` names no case in
     `cases` is dropped from every slice/difficulty/source bucket (it cannot
-    be placed) but still counts in the overall block and the error line --
-    the run happened even if this call's `cases` list is a stale or partial
-    view of the golden set that produced it.
+    be placed) but still counts in the overall block, and is counted, not
+    silently lost, via `errors.unmatched_case_rows` -- the run happened even
+    if this call's `cases` list is a stale or partial view of the golden set
+    that produced it, and that must be visible rather than read as a
+    quietly shrunk axis.
 
     Error rows (`row.error is not None`) are filtered out here, once, before
     any other computation -- see the module docstring.
@@ -350,27 +358,39 @@ def aggregate(
     error_rows = [r for r in rows if r.error is not None]
     ok_rows = [r for r in rows if r.error is None]
 
-    metrics: Metrics = {
-        "errors": {
-            "error_count": len(error_rows),
-            "error_rate": (len(error_rows) / total) if total else None,
-            "n": total,
-        },
-        **_metric_block(ok_rows),
-    }
-
     case_by_id = {case.id: case for case in cases}
     by_slice: dict[str, list[Row]] = {}
     by_difficulty: dict[str, list[Row]] = {}
     by_source: dict[str, list[Row]] = {}
+    unmatched = 0
     for row in ok_rows:
         case = case_by_id.get(row.case_id)
         if case is None:
+            # A stale or partial `cases` snapshot must not silently shrink
+            # every per-axis n -- counted here so it is visible beside
+            # `error_count`, never just absent from the by_slice/
+            # by_difficulty/by_source tables with no trace.
+            unmatched += 1
             continue
         for slice_name in derive_slices(case, registry):
             by_slice.setdefault(slice_name, []).append(row)
         by_difficulty.setdefault(derive_difficulty(case, registry), []).append(row)
         by_source.setdefault(case.source, []).append(row)
+
+    metrics: Metrics = {
+        "errors": {
+            "error_count": len(error_rows),
+            "error_rate": (len(error_rows) / total) if total else None,
+            "n": total,
+            #: Rows whose `case_id` matched no case in `cases` -- always `0`
+            #: in a healthy run (a complete, current golden-set snapshot).
+            #: Excluded from every by_slice/by_difficulty/by_source bucket
+            #: for the same reason error rows are: axis n's + this count
+            #: must reconcile with the overall (non-error) row count.
+            "unmatched_case_rows": unmatched,
+        },
+        **_metric_block(ok_rows),
+    }
 
     metrics["by_slice"] = {
         name: _metric_block(bucket) for name, bucket in sorted(by_slice.items())

@@ -182,6 +182,22 @@ def test_field_pr_is_micro_over_rows_with_correct_root(registry):
     assert metrics["field_recall"] == {"value": 5 / 7, "n": 7}
 
 
+def test_field_pr_pure_aggregate_row_contributes_zero_zero(registry):
+    """A root-correct row with no gold condition field at all (a bare
+    `count(*)`, say) scores field_tp=field_fp=field_fn=0 in `scoring.py`.
+    It must contribute (0, 0) to the headline ratio -- no phantom true
+    positive inflating the numerator, no phantom miss inflating the
+    denominator -- so mixing it into an otherwise-perfect bucket leaves the
+    ratio unchanged."""
+    rows = [
+        _row("c1", root_correct=True, field_tp=2, field_fp=0, field_fn=0),
+        _row("c2", root_correct=True, field_tp=0, field_fp=0, field_fn=0),
+    ]
+    metrics = aggregate(rows, [], registry)
+    assert metrics["field_precision"] == {"value": 1.0, "n": 2}
+    assert metrics["field_recall"] == {"value": 1.0, "n": 2}
+
+
 # --------------------------------------------------------------------------
 # operator accuracy
 # --------------------------------------------------------------------------
@@ -386,7 +402,14 @@ def test_error_rows_are_excluded_from_metrics_but_counted(registry):
         _row("c5", e2e_correct=False, root_correct=False, error="502"),
     ]
     metrics = aggregate(rows, [], registry)
-    assert metrics["errors"] == {"error_count": 2, "error_rate": 2 / 5, "n": 5}
+    # No `cases` passed here (this test is about the error filter, not the
+    # case join) -- so all 3 non-error rows are, correctly, unmatched too.
+    assert metrics["errors"] == {
+        "error_count": 2,
+        "error_rate": 2 / 5,
+        "n": 5,
+        "unmatched_case_rows": 3,
+    }
     # Only the three non-error rows feed the accuracy numbers.
     assert metrics["root_accuracy"] == {"value": 2 / 3, "n": 3}
     assert metrics["e2e_correct_rate"] == {"value": 2 / 3, "n": 3}
@@ -394,7 +417,12 @@ def test_error_rows_are_excluded_from_metrics_but_counted(registry):
 
 def test_error_line_is_none_rate_with_no_rows_at_all(registry):
     metrics = aggregate([], [], registry)
-    assert metrics["errors"] == {"error_count": 0, "error_rate": None, "n": 0}
+    assert metrics["errors"] == {
+        "error_count": 0,
+        "error_rate": None,
+        "n": 0,
+        "unmatched_case_rows": 0,
+    }
 
 
 # --------------------------------------------------------------------------
@@ -475,6 +503,31 @@ def test_row_with_unmatched_case_id_is_dropped_from_axes_not_from_totals(registr
     assert metrics["by_slice"] == {}
     assert metrics["by_difficulty"] == {}
     assert metrics["by_source"] == {}
+
+
+def test_unmatched_case_id_is_counted_loudly_not_silently_dropped(registry):
+    """A stale/partial `cases` snapshot must not quietly shrink every
+    per-axis n. One row joins cleanly; one row's case_id is bogus. The
+    bogus row is counted in `unmatched_case_rows`, present in the overall
+    block, and absent from every axis -- and the axis n's plus the
+    unmatched count reconcile with the overall (non-error) row count."""
+    payload = {"root": "widget", "where": _and(_cond("widget.price", ">", 100))}
+    cases = [_ok_case("real", payload)]
+    rows = [
+        _row("real", root_correct=True, e2e_correct=True),
+        _row("bogus-id", root_correct=False, e2e_correct=False),
+    ]
+    metrics = aggregate(rows, cases, registry)
+
+    assert metrics["errors"]["unmatched_case_rows"] == 1
+    # Still in the overall block: both rows feed root_accuracy.
+    assert metrics["root_accuracy"] == {"value": 0.5, "n": 2}
+    # Absent from every axis: only the matched row reaches any bucket.
+    axis_n = metrics["by_slice"]["simple-filter"]["root_accuracy"]["n"]
+    assert axis_n == 1
+    assert metrics["by_source"]["hand-written"]["root_accuracy"]["n"] == 1
+    # Reconciliation: axis n (matched) + unmatched == overall non-error n.
+    assert axis_n + metrics["errors"]["unmatched_case_rows"] == 2
 
 
 # --------------------------------------------------------------------------
