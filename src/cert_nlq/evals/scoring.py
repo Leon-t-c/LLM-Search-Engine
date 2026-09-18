@@ -103,6 +103,15 @@ class Row:
     joins_expected: tuple[str, ...] | None
     joins_actual: tuple[str, ...] | None
     groups_recall_hit: bool | None
+    #: Which path produced `groups_recall_hit`: `"echo"` when the service's
+    #: route echo was usable (the real measurement), `"proxy"` when it fell
+    #: back to the lower-bound heuristic, `None` whenever `groups_recall_hit`
+    #: itself is `None` (nothing to derive from). Added in Task 4 so the
+    #: aggregator can report the two separately rather than silently
+    #: averaging a real measurement together with an optimistic proxy -- see
+    #: `_groups_recall_hit`'s own docstring for why blending them would
+    #: mislead a reader who trusts the number.
+    groups_recall_source: Literal["echo", "proxy"] | None
     fields_expected: tuple[str, ...] | None
     fields_actual: tuple[str, ...] | None
     field_tp: int | None
@@ -641,6 +650,7 @@ def score(case: GoldenCase, outcome: Outcome, root: RootSpec) -> Row:
 
     root_correct = joins_expected = joins_actual = None
     groups_recall_hit = None
+    groups_recall_source = None
     fields_expected = fields_actual = None
     field_tp = field_fp = field_fn = None
     ops_correct = ops_total = None
@@ -704,6 +714,10 @@ def score(case: GoldenCase, outcome: Outcome, root: RootSpec) -> Row:
         groups_recall_hit = _groups_recall_hit(
             _all_touched_fields(gold_payload), actual_payload, root, outcome.route
         )
+        if groups_recall_hit is not None:
+            groups_recall_source = (
+                "echo" if _routed_groups(outcome.route) is not None else "proxy"
+            )
 
     elif kind == "clarify":
         root_correct = _route_root_correct(case, outcome.route)
@@ -736,6 +750,7 @@ def score(case: GoldenCase, outcome: Outcome, root: RootSpec) -> Row:
         joins_expected=joins_expected,
         joins_actual=joins_actual,
         groups_recall_hit=groups_recall_hit,
+        groups_recall_source=groups_recall_source,
         fields_expected=fields_expected,
         fields_actual=fields_actual,
         field_tp=field_tp,

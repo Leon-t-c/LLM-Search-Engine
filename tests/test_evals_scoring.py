@@ -718,6 +718,55 @@ def test_a_route_carrying_no_groups_at_all_is_a_miss_not_a_fallback(registry):
     assert row.groups_recall_hit is False
 
 
+def test_groups_recall_source_is_echo_when_the_route_has_usable_groups(registry):
+    """Task 4's aggregator reports echoed and proxied group recall
+    separately; the row must say which path produced its hit."""
+    root = registry.root("widget")
+    gold = {"root": "widget", "where": _and(_cond("widget.price", ">", 100))}
+    row = score(
+        _ok_case("g-6", gold),
+        _outcome(status="ok", payload=gold, route=_route(groups=["Commercial"])),
+        root,
+    )
+    assert row.groups_recall_source == "echo"
+
+
+def test_groups_recall_source_is_proxy_without_a_usable_route(registry):
+    root = registry.root("widget")
+    gold = {"root": "widget", "where": _and(_cond("widget.price", ">", 100))}
+    for bad_route in (None, {}, {"groups": "Commercial"}):
+        row = score(
+            _ok_case("g-7", gold),
+            _outcome(status="ok", payload=gold, route=bad_route),
+            root,
+        )
+        assert row.groups_recall_source == "proxy", bad_route
+
+
+def test_groups_recall_source_is_none_when_the_hit_is_unmeasured(registry):
+    """No gold condition/aggregate/group_by/sort field at all -- the same
+    case `groups_recall_hit` itself returns `None` for."""
+    root = registry.root("widget")
+    gold = {"root": "widget", "aggregate": [{"fn": "count", "field": "*", "as": "n"}]}
+    row = score(
+        _ok_case("g-8", gold),
+        _outcome(status="ok", payload=gold, route=_route(groups=["Commercial"])),
+        root,
+    )
+    assert row.groups_recall_hit is None
+    assert row.groups_recall_source is None
+
+
+def test_groups_recall_source_is_none_off_the_ok_path(registry):
+    """Only `kind == "ok"` rows ever compute `groups_recall_hit`; a clarify
+    or refusal row must not pick up a stray source either."""
+    root = registry.root("widget")
+    case = _clarify_case("g-9", "widget.status")
+    row = score(case, _outcome(status="clarify", route=_route(root="widget")), root)
+    assert row.groups_recall_hit is None
+    assert row.groups_recall_source is None
+
+
 # --------------------------------------------------------------------------
 # end_to_end_correct(): the frozen primary outcome
 # --------------------------------------------------------------------------
