@@ -76,7 +76,8 @@ def test_clarify_and_refusal_cases_load(tmp_path, registry):
     cases = load_golden(
         _write(
             tmp_path,
-            _case("g-001", expect={"kind": "clarify", "field": "widget.status"}),
+            _case("g-001", question="widgets in a funny state",
+                  expect={"kind": "clarify", "field": "widget.status"}),
             _case("g-002", expect={"kind": "refusal", "reason": "not_a_query"}),
         ),
         registry,
@@ -618,7 +619,7 @@ def test_gold_root_records_the_route_a_clarify_case_expects(tmp_path, registry):
     cases = load_golden(
         _write(
             tmp_path,
-            _case("g-092", gold_root="widget",
+            _case("g-092", gold_root="widget", question="widgets in a funny state",
                   expect={"kind": "clarify", "field": "widget.status"}),
         ),
         registry,
@@ -858,3 +859,52 @@ def test_an_int_gold_value_does_not_match_a_float_one(tmp_path, registry):
             ),
             registry,
         )
+
+
+def test_a_clarify_case_whose_word_resolves_is_rejected(tmp_path, registry):
+    """A gold `clarify` asserts that a value in the question does NOT map
+    onto the field's vocabulary. If it does, the service correctly answers
+    `ok` and this case scores it a failure for ever -- unreachable gold, the
+    same class as a clarify case with nothing left after pruning."""
+    with pytest.raises(GoldenError) as exc:
+        load_golden(
+            _write(
+                tmp_path,
+                _case("g-130", question="active widgets in the north",
+                      expect={"kind": "clarify", "field": "widget.status"}),
+            ),
+            registry,
+        )
+    message = str(exc.value)
+    assert "g-130" in message
+    assert "active" in message
+    assert "'A'" in message
+
+
+def test_a_two_word_vocabulary_synonym_is_caught_too(tmp_path, registry):
+    """`in service` is a synonym of `A`, and it is two words. Checking only
+    single words would miss exactly the phrases a vocabulary spells out."""
+    with pytest.raises(GoldenError, match="in service"):
+        load_golden(
+            _write(
+                tmp_path,
+                _case("g-131", question="widgets in service last year",
+                      expect={"kind": "clarify", "field": "widget.status"}),
+            ),
+            registry,
+        )
+
+
+def test_a_clarify_case_with_a_genuinely_unresolvable_word_loads(tmp_path, registry):
+    """Exact matches only, no fuzz: "mothballed" is not `Retired`, and a
+    false block here would stop the whole file loading over a case that is
+    perfectly good. Nor does the indefinite article count as the code `A`."""
+    cases = load_golden(
+        _write(
+            tmp_path,
+            _case("g-132", question="mothballed widgets from a 2024 batch",
+                  expect={"kind": "clarify", "field": "widget.status"}),
+        ),
+        registry,
+    )
+    assert cases[0].expect.field == "widget.status"

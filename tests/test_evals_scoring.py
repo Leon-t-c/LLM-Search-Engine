@@ -814,3 +814,74 @@ def test_end_to_end_correct_is_one_function_every_branch_reads(registry):
         exact_match=None,
         candidate_hit=None,
     ) is True
+
+
+def test_gold_root_scores_the_route_on_a_clarify_case(registry):
+    """The stage-1 metric covers the whole set now: a clarify case carries no
+    payload to read a root off, so `gold_root` plus the echo answers it."""
+    root = registry.root("widget")
+    case = GoldenCase.model_validate({
+        "id": "g-r1", "question": "widgets in a funny state", "tags": [],
+        "source": "hand-written", "gold_root": "widget",
+        "expect": {"kind": "clarify", "field": "widget.status"},
+    })
+    right = score(
+        case, _outcome(status="clarify", route=_route(root="widget")), root
+    )
+    wrong = score(
+        case, _outcome(status="clarify", route=_route(root="vendor")), root
+    )
+    assert right.root_correct is True
+    assert wrong.root_correct is False
+
+
+def test_gold_root_scores_the_route_on_a_refusal_case(registry):
+    root = registry.root("widget")
+    case = GoldenCase.model_validate({
+        "id": "g-r2", "question": "widgets nobody stocks", "tags": [],
+        "source": "hand-written", "gold_root": "widget",
+        "expect": {"kind": "refusal", "reason": "field_not_in_schema"},
+    })
+    row = score(
+        case,
+        _outcome(status="refusal", reason="field_not_in_schema",
+                 route=_route(root="widget")),
+        root,
+    )
+    assert row.root_correct is True
+
+
+def test_a_case_with_no_gold_root_or_no_echo_is_not_measured(registry):
+    """`None` is "not measurable", not "wrong". A `not_a_query` refusal has
+    no right root -- "hello" routes nowhere -- and a response that never
+    routed has nothing to compare against."""
+    root = registry.root("widget")
+    rootless = _refusal_case("g-r3", "not_a_query")
+    anchored = GoldenCase.model_validate({
+        "id": "g-r4", "question": "widgets in a funny state", "tags": [],
+        "source": "hand-written", "gold_root": "widget",
+        "expect": {"kind": "clarify", "field": "widget.status"},
+    })
+    assert score(
+        rootless, _outcome(status="refusal", reason="not_a_query",
+                           route=_route(root="widget")), root
+    ).root_correct is None
+    assert score(anchored, _outcome(status="clarify"), root).root_correct is None
+    assert score(
+        anchored, _outcome(status="clarify", route={"groups": []}), root
+    ).root_correct is None
+
+
+def test_a_route_whose_groups_are_not_strings_falls_back_to_the_proxy(registry):
+    """`{"groups": [1, 2]}` is an unreadable echo, not "routed to nothing".
+    Filtering the non-strings out would score a miss against a service that
+    may well have routed correctly."""
+    root = registry.root("widget")
+    gold = {"root": "widget", "where": _and(_cond("widget.price", ">", 100))}
+    row = score(
+        _ok_case("g-r5", gold),
+        _outcome(status="ok", payload=gold, route={"root": "widget",
+                                                   "groups": [1, 2]}),
+        root,
+    )
+    assert row.groups_recall_hit is True

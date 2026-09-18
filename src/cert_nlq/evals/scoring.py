@@ -463,7 +463,13 @@ def _routed_groups(route: dict | None) -> frozenset[str] | None:
     groups = route.get("groups")
     if not isinstance(groups, (list, tuple)):
         return None
-    return frozenset(g for g in groups if isinstance(g, str))
+    if not all(isinstance(g, str) for g in groups):
+        # Filtering the non-strings out would turn `[1, 2]` into "routed to
+        # nothing" and score a miss against a service that may well have
+        # routed correctly. A list that is not a list of group names is an
+        # unreadable echo, same as a missing one.
+        return None
+    return frozenset(groups)
 
 
 def _gold_groups(gold_fields: set[str], root: RootSpec) -> frozenset[str]:
@@ -480,6 +486,28 @@ def _gold_groups(gold_fields: set[str], root: RootSpec) -> frozenset[str]:
         for f in gold_fields
         if f in by_key and by_key[f].group and by_key[f].group not in identity
     )
+
+
+def _route_root_correct(case: GoldenCase, route: dict | None) -> bool | None:
+    """Did stage 1 route to the root the gold case says it should have?
+
+    Only for the cases whose expectation carries no payload to read a root
+    off -- clarify and refusal. The gold payload answers it for an ok case,
+    and it is answered there, against what the service actually returned.
+
+    `None` means not measurable rather than not correct, and there are two
+    ways to get there: a case with no `gold_root` (a `not_a_query` refusal
+    has no right root -- "hello" routes nowhere), and a response with no
+    usable route echo (an older deploy, or a request that refused before it
+    ever routed). Scoring either as a miss would blame the service for a
+    question the run cannot ask.
+    """
+    if case.gold_root is None or not isinstance(route, dict):
+        return None
+    routed = route.get("root")
+    if not isinstance(routed, str):
+        return None
+    return routed == case.gold_root
 
 
 def _groups_recall_hit(
@@ -678,6 +706,7 @@ def score(case: GoldenCase, outcome: Outcome, root: RootSpec) -> Row:
         )
 
     elif kind == "clarify":
+        root_correct = _route_root_correct(case, outcome.route)
         clarify_field_expected = case.expect.field
         candidate_field_keys = {
             c.get("field") for c in outcome.candidates if isinstance(c, dict)
@@ -685,6 +714,7 @@ def score(case: GoldenCase, outcome: Outcome, root: RootSpec) -> Row:
         candidate_hit = clarify_field_expected in candidate_field_keys
 
     else:  # kind == "refusal"
+        root_correct = _route_root_correct(case, outcome.route)
         refusal_reason_expected = case.expect.reason
 
     # Recorded whenever the service actually refused, regardless of what was

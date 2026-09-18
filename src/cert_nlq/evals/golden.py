@@ -21,6 +21,7 @@ for every run afterwards:
 """
 import json
 import re
+from itertools import pairwise
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -30,6 +31,7 @@ from ..ir.payload import Payload
 from ..ir.validate import PayloadError, validate_payload
 from ..registry.models import Registry, RootSpec
 from ..translate.refusals import RefusalReason
+from ..translate.values import resolve_vocabulary
 
 #: Bumped whenever `derive_slices` or `derive_difficulty` changes what it
 #: says about an unchanged case. A stored run records it, so a later
@@ -56,6 +58,9 @@ SLICES = frozenset({
     "clarification",
     "refusal",
 })
+
+#: Word tokens of a question, for the clarify-reachability check below.
+_WORD_RE = re.compile(r"[A-Za-z0-9&]+")
 
 #: The closed set of hand tags. `tags` carries **only** these: the slice axis
 #: is derived, so a slice tag written by hand is a second copy of a fact the
@@ -502,6 +507,7 @@ def load_golden(path: str | Path, registry: Registry) -> list[GoldenCase]:
             first_seen[case.id] = lineno
         problems += _check_tags(case)
         problems += _check_gold_root(case, registry)
+        problems += _check_clarify_is_reachable(case, registry)
         problems += _check_expectation(case, registry)
         cases.append(case)
 
@@ -537,6 +543,52 @@ def _check_tags(case: GoldenCase) -> list[str]:
     return []
 
 
+def _check_clarify_is_reachable(case: GoldenCase, registry: Registry) -> list[str]:
+    """A clarify case's ambiguous word must not resolve on its own field.
+
+    A gold `clarify` asserts that some value in the question fails to map
+    onto the field's vocabulary. If the word actually resolves, the service
+    correctly answers `ok` and this case scores it a failure for ever --
+    the same class of unreachable gold as a clarify case with no anchor
+    condition, moved from "nothing survives pruning" to "nothing failed".
+
+    Checked against the *live* vocabulary through `resolve_vocabulary`, the
+    same function the service resolves with, so this cannot drift from it.
+    Every whole word and every adjacent word pair is tried, and **exact
+    matches only** -- case-folded code, meaning or synonym, which is all
+    `resolve_vocabulary` itself accepts. No fuzzy matching: a false block on
+    a legitimate case costs more here than a miss, because the miss is
+    visible the first time the case is scored and the false block stops the
+    whole file loading.
+    """
+    if not isinstance(case.expect, ExpectClarify):
+        return []
+    # One-character tokens are dropped, and that is the one concession to
+    # noise: several vocabularies code their entries as single letters
+    # (`F` for Filed, `A` for Active), and English writes "a" constantly. A
+    # lone letter in prose is not a user typing a stored code, and blocking
+    # the file over the indefinite article would be exactly the false block
+    # this check is supposed to be cheap enough to avoid.
+    words = [w for w in _WORD_RE.findall(case.question) if len(w) > 1]
+    phrases = words + [f"{a} {b}" for a, b in pairwise(words)]
+    problems = []
+    for root in registry.roots:
+        spec = root.fields_by_key.get(case.expect.field)
+        if spec is None:
+            continue
+        for phrase in phrases:
+            code = resolve_vocabulary(spec, phrase)
+            if code is not None:
+                problems.append(
+                    f"{case.id}: {phrase!r} resolves on {case.expect.field!r} "
+                    f"to code {code!r}, so the service answers this question "
+                    f"rather than asking about it -- a clarify case needs a "
+                    f"value that genuinely does not resolve"
+                )
+                break
+    return problems
+
+
 def _check_gold_root(case: GoldenCase, registry: Registry) -> list[str]:
     """A declared `gold_root` has to name a root the registry offers.
 
@@ -561,14 +613,35 @@ def _literals(question: str) -> list[str]:
     return _NUMBER_RE.findall(question) + _CODE_RE.findall(question)
 
 
+#: A root carrying no fields, used only to borrow `scoring.canonical`'s
+#: *structural* normalisation -- `value2: null` folded together with an
+#: absent `value2`, `join: []` with no `join` at all, children sorted,
+#: aggregate aliases positionalised -- without its registry-typed value
+#: coercion. The coercion is the one part that must not apply here: it maps
+#: `2024` and `2024.0` onto the same number, and the gold conventions treat
+#: those as different facts (an int year, a float money amount). No spec is
+#: found for any field, so every value is rendered as written.
+_TYPELESS_ROOT = RootSpec(root="", label="", key=(), fields=())
+
+
 def _expectation_text(case: GoldenCase) -> str:
     """One case's whole expectation, rendered for an exact comparison.
 
-    Key order is not meaning, so keys are sorted; the *values* are rendered
-    as written, so `2024` and `2024.0` -- which the gold conventions treat
-    as different facts, an int year and a float -- do not compare equal.
+    Absence and emptiness are not differences -- a gold payload that spells
+    out `"value2": null` says exactly what one that omits the key says --
+    so an ok payload goes through the same canonical form the scorer uses,
+    minus the type coercion (see `_TYPELESS_ROOT`). Clarify and refusal
+    expectations have no payload and are rendered as they stand.
     """
-    return json.dumps(case.expect.model_dump(), sort_keys=True)
+    # Imported here, not at module scope: `scoring` imports this module, and
+    # the normalisation is wanted in exactly one function.
+    from .scoring import canonical
+
+    dumped = case.expect.model_dump()
+    payload = dumped.get("payload")
+    if isinstance(payload, dict):
+        dumped["payload"] = canonical(payload, _TYPELESS_ROOT)
+    return json.dumps(dumped, sort_keys=True)
 
 
 def _check_paraphrases(cases: list[GoldenCase]) -> list[str]:
@@ -583,13 +656,12 @@ def _check_paraphrases(cases: list[GoldenCase]) -> list[str]:
     human read, which is why every paraphrase is born `review`-tagged.
 
     The expectation itself is checked outright: a paraphrase asserts the
-    same answer as its original, down to the serialised text of the gold
-    payload, or it is not a paraphrase. Value equality would not be enough
-    -- Python calls `2024` and `2024.0` the same number and this file's own
-    conventions do not -- so the comparison is over the rendered JSON, which
-    also means a divergence is reportable rather than merely detectable. A
-    rewording that genuinely changes scope belongs in the set as a case of
-    its own, with its own id and its own gold.
+    same answer as its original, or it is not a paraphrase. The comparison
+    is over the canonical form of the gold payload (see `_expectation_text`)
+    -- so writing `value2: null` where the original omitted it is not a
+    difference, while `2024` against `2024.0` still is. A rewording that
+    genuinely changes scope belongs in the set as a case of its own, with
+    its own id and its own gold.
     """
     by_id = {case.id: case for case in cases}
     problems = []
