@@ -15,6 +15,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.3", "respx>=0.21", "ruff>=0.6"]
+evals = ["sqlalchemy>=2.0"]
 
 [build-system]
 requires = ["setuptools>=68"]
