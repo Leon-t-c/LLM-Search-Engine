@@ -194,6 +194,92 @@ def test_primary_mcnemar_excludes_a_shared_paraphrase_row():
 
 
 # --------------------------------------------------------------------------
+# render_compare: error rows are excluded everywhere, and counted
+# --------------------------------------------------------------------------
+
+
+def test_error_row_on_run_a_is_excluded_from_the_primary_mcnemar_table():
+    """A 502/timeout on run A's copy of a case must not enter the
+    discordant-pair table just because `score()` scores an error row
+    e2e_correct=False like a genuine wrong answer -- `render_compare` filters
+    `error is not None` before pairing, the same discipline `aggregate()`
+    already applies.
+    """
+    from cert_nlq.registry.models import Registry, RootSpec
+
+    root = RootSpec(root="widget", label="Widgets", key=(), fields=())
+    reg = Registry(version="v", roots=(root,))
+
+    c1, c2 = _ok_case("c1"), _ok_case("c2")
+    cases = [c1, c2]
+
+    # c1 on A is an infra failure (error row); if it wrongly entered the
+    # table it would be A-wrong/B-right (n01) -- discordant. c2 is a real
+    # concordant pair (both right), so without c1 the table has nothing.
+    rows_a = [_row("c1", False, error="timeout"), _row("c2", True)]
+    rows_b = [_row("c1", True), _row("c2", True)]
+    run_a, run_b = _run_identity(id="run-a"), _run_identity(id="run-b")
+
+    text = render_compare(run_a, rows_a, run_b, rows_b, cases, reg, seed=1)
+
+    n10_match = re.search(r"n10 \(A right / B wrong\) = (\d+)", text)
+    n01_match = re.search(r"n01 \(B right / A wrong\) = (\d+)", text)
+    assert n10_match is not None and n01_match is not None
+    assert n10_match.group(1) == "0", text
+    assert n01_match.group(1) == "0", text
+    assert "Shared, error-free cases: 1" in text
+
+
+def test_error_row_on_run_a_is_excluded_from_the_latency_delta():
+    """The same error row's (fabricated, extreme) latency must not enter
+    `median_delta_ci`'s paired per-case differences either."""
+    from cert_nlq.registry.models import Registry, RootSpec
+
+    root = RootSpec(root="widget", label="Widgets", key=(), fields=())
+    reg = Registry(version="v", roots=(root,))
+
+    c1, c2 = _ok_case("c1"), _ok_case("c2")
+    cases = [c1, c2]
+
+    rows_a = [
+        _row("c1", False, error="timeout", latency_ms=180_000.0),
+        _row("c2", True, latency_ms=100.0),
+    ]
+    rows_b = [_row("c1", True, latency_ms=110.0), _row("c2", True, latency_ms=105.0)]
+    run_a, run_b = _run_identity(id="run-a"), _run_identity(id="run-b")
+
+    text = render_compare(run_a, rows_a, run_b, rows_b, cases, reg, seed=1)
+
+    # Only c2 (100 vs 105 -> delta -5) is error-free on both sides; a CI
+    # straddling the huge 180_000ms error-row diff would be enormous and
+    # obviously wrong, so pinning it near -5 confirms the error row never
+    # entered the pool.
+    match = re.search(
+        r"family-cluster-bootstrap 95% CI: \[([-\d.]+), ([-\d.]+)\]", text
+    )
+    assert match is not None, text
+    lo, hi = float(match.group(1)), float(match.group(2))
+    assert -10 < lo <= hi < 10, text
+
+
+def test_render_compare_header_reports_each_runs_error_count():
+    from cert_nlq.registry.models import Registry, RootSpec
+
+    root = RootSpec(root="widget", label="Widgets", key=(), fields=())
+    reg = Registry(version="v", roots=(root,))
+
+    c1 = _ok_case("c1")
+    rows_a = [_row("c1", False, error="502")]
+    rows_b = [_row("c1", True)]
+    run_a, run_b = _run_identity(id="run-a"), _run_identity(id="run-b")
+
+    text = render_compare(run_a, rows_a, run_b, rows_b, [c1], reg, seed=1)
+
+    assert "error rows: 1 of 1" in text  # run A
+    assert "error rows: 0 of 1" in text  # run B
+
+
+# --------------------------------------------------------------------------
 # family_accuracy / family_consistency rendered adjacent
 # --------------------------------------------------------------------------
 

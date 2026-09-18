@@ -6,10 +6,17 @@ metric block plus its per-slice/difficulty/source tables -- everything
 `render_compare` renders the frozen three-layer comparison the owner
 specified 2026-09-18 (`task-4b-brief.md`, restated in this task's brief):
 
-1. **Primary** -- exact paired McNemar on `e2e_correct`, over the CANONICAL
-   cases both runs share. This is the one confirmatory test in the whole
-   eval; the canonical filter is applied *here*, not inside `stats.py`
-   (`mcnemar_exact`'s own docstring: "the report owns that filter").
+0. **Error rows (`row.error is not None`) are excluded before layers 1-2
+   even see a case** -- the same discipline `aggregate()` applies to layer
+   3. An infra failure (a 502, a timeout) is not a model answer; letting it
+   into the primary pairing would move the one confirmatory p-value on a
+   coin flip. A case enters the comparison only when *both* runs have an
+   error-free row for it. Each run's error count is printed in the header.
+1. **Primary** -- exact paired McNemar on `e2e_correct`, over the
+   error-free CANONICAL cases both runs share. This is the one confirmatory
+   test in the whole eval; the canonical filter is applied *here*, not
+   inside `stats.py` (`mcnemar_exact`'s own docstring: "the report owns
+   that filter").
 2. **Secondary** -- the paraphrase-expanded shared set: cluster-bootstrap
    accuracy intervals per model, and `family_accuracy`/`family_consistency`
    side by side per model (never one without the other -- `stats.py`'s own
@@ -72,6 +79,16 @@ ESTIMATED_OUTPUT_TOKENS_PER_CASE = 300
 
 def _price_for(model_id: str) -> dict[str, float]:
     return PRICE_PER_1M_TOKENS.get(model_id, PRICE_PER_1M_TOKENS["default"])
+
+
+def has_pricing_for(model_id: str) -> bool:
+    """Whether `model_id` has its own entry in `PRICE_PER_1M_TOKENS`, as
+    opposed to silently falling back to `"default"`. The CLI's spend gate
+    checks this before printing an estimate, so a reader sees "no rate on
+    file, using placeholder rates" rather than a confident-looking dollar
+    figure that is quietly built on a rate for a different model.
+    """
+    return model_id in PRICE_PER_1M_TOKENS
 
 
 def estimate_spend(n_cases: int, model_id: str) -> float:
@@ -344,6 +361,20 @@ def render_compare(
     `cases` is the golden set both runs replayed (or a superset of it);
     family membership and the canonical/paraphrase split are read off it,
     never off the rows.
+
+    **Error rows (`row.error is not None`) are excluded before anything
+    else here**, the same discipline `aggregate()` already applies (its own
+    module docstring): a 502 or a timeout is infra flakiness, not a model
+    answer, and letting one into the primary McNemar pairing would move the
+    single confirmatory p-value on a coin flip that has nothing to do with
+    either model. A case only enters the shared/canonical/expanded sets
+    below when **both** runs have an error-free row for it -- a case where
+    only one side failed contributes nothing to either side's comparison,
+    rather than comparing a real answer against a failure. Section 3's
+    `aggregate()` calls receive the *unfiltered* `rows_a`/`rows_b` (they do
+    their own, identical filtering internally and additionally report the
+    per-run error count/rate), so the two no longer disagree about what an
+    "error" run's rate even means.
     """
     _check_identity(run_a, run_b)
 
@@ -353,8 +384,10 @@ def render_compare(
         return family_map.get(row.case_id, row.case_id)
 
     canonical_ids = {c.id for c in cases if c.paraphrase_of is None}
-    by_id_a = {r.case_id: r for r in rows_a}
-    by_id_b = {r.case_id: r for r in rows_b}
+    errors_a = sum(1 for r in rows_a if r.error is not None)
+    errors_b = sum(1 for r in rows_b if r.error is not None)
+    by_id_a = {r.case_id: r for r in rows_a if r.error is None}
+    by_id_b = {r.case_id: r for r in rows_b if r.error is None}
     shared_ids = sorted(set(by_id_a) & set(by_id_b))
     shared_canonical_ids = [cid for cid in shared_ids if cid in canonical_ids]
 
@@ -366,9 +399,12 @@ def render_compare(
     lines = [
         f"# Compare `{run_a.id}` (A) vs `{run_b.id}` (B)",
         "",
-        f"- A: {run_a.provider} / {run_a.model_id}, concurrency {run_a.concurrency}",
-        f"- B: {run_b.provider} / {run_b.model_id}, concurrency {run_b.concurrency}",
-        f"- Shared cases: {len(shared_ids)} (canonical: {len(shared_canonical_ids)})",
+        f"- A: {run_a.provider} / {run_a.model_id}, concurrency {run_a.concurrency}, "
+        f"error rows: {errors_a} of {len(rows_a)}",
+        f"- B: {run_b.provider} / {run_b.model_id}, concurrency {run_b.concurrency}, "
+        f"error rows: {errors_b} of {len(rows_b)}",
+        f"- Shared, error-free cases: {len(shared_ids)} "
+        f"(canonical: {len(shared_canonical_ids)})",
         f"- Bootstrap/permutation seed: {seed}",
         "",
     ]

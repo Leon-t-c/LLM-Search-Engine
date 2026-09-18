@@ -52,20 +52,32 @@ def _elapsed_ms(started: float) -> float:
     return (time.monotonic() - started) * 1000
 
 
-def _to_outcome(response: httpx.Response, latency_ms: float) -> Outcome:
-    """One `/translate` response body -> one `Outcome`.
+def _safe_json(response: httpx.Response) -> dict | None:
+    """The response body as a dict, or `None` when it is not JSON at all or
+    not a JSON object -- never raises. Used to populate `Outcome.raw` on
+    every path, including a non-2xx response that still carries a JSON
+    error body.
+    """
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    return body if isinstance(body, dict) else None
+
+
+def _to_outcome(body: dict, latency_ms: float) -> Outcome:
+    """One already-parsed `/translate` response body -> one `Outcome`,
+    `raw=body` on every instance this returns (`Outcome.raw`'s own
+    docstring: a later evaluator-version bump re-scores from the untouched
+    wire body, not from this function's own translated snapshot of it).
 
     Raises `ValueError`/`TypeError`/`KeyError`/`pydantic.ValidationError` on
-    anything this cannot make sense of -- `response.json()`'s own decode
-    error included -- and the caller (`_call_one`) turns every one of those
-    into an error `Outcome` rather than letting it propagate. That keeps
-    this function itself simple (raise on the first thing that looks wrong)
-    while still meeting `run_benchmark`'s never-raises contract at the one
-    place that matters.
+    anything this cannot make sense of, and the caller (`_call_one`) turns
+    every one of those into an error `Outcome` -- still carrying `raw`,
+    since the body was parsed successfully even if this function could not
+    place it into one of the three known shapes -- rather than letting it
+    propagate.
     """
-    body = response.json()
-    if not isinstance(body, dict):
-        raise ValueError(f"expected a JSON object, got {type(body).__name__}")
     status = _STATUS_MAP.get(body.get("status"))
     if status is None:
         raise ValueError(f"unrecognised wire status {body.get('status')!r}")
@@ -75,7 +87,8 @@ def _to_outcome(response: httpx.Response, latency_ms: float) -> Outcome:
 
     if status == "ok":
         return Outcome(
-            status="ok", payload=payload, latency_ms=latency_ms, usage=usage, route=route
+            status="ok", payload=payload, latency_ms=latency_ms, usage=usage, route=route,
+            raw=body,
         )
     if status == "clarify":
         unresolved = body.get("unresolved")
@@ -88,6 +101,7 @@ def _to_outcome(response: httpx.Response, latency_ms: float) -> Outcome:
             latency_ms=latency_ms,
             usage=usage,
             route=route,
+            raw=body,
         )
     # status == "refusal"
     reason = body.get("reason")
@@ -97,6 +111,7 @@ def _to_outcome(response: httpx.Response, latency_ms: float) -> Outcome:
         latency_ms=latency_ms,
         usage=usage,
         route=route,
+        raw=body,
     )
 
 
@@ -121,23 +136,35 @@ async def _call_one(
                 json={"question": case.question, "now_year": now_year},
                 timeout=CALL_TIMEOUT_SECONDS,
             )
-            response.raise_for_status()
         except httpx.HTTPError as exc:
-            # Covers both transport failures (timeout, connect error -- an
-            # `httpx.RequestError`) and non-2xx statuses (`raise_for_status`'s
-            # own `httpx.HTTPStatusError`, a subclass of the same base):
-            # either way the HTTP call itself failed, exactly the condition
-            # `Outcome.error` documents. Everything else on the `Outcome`
-            # stays at its default (unset), per that contract.
+            # A pure transport failure (timeout, connect error): no response
+            # was ever received, so there is no wire body for `raw` either.
             return Outcome(latency_ms=_elapsed_ms(started), error=str(exc))
-        latency_ms = _elapsed_ms(started)
+        raw_body = _safe_json(response)
         try:
-            return _to_outcome(response, latency_ms)
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            # The wire answered, just not with 2xx -- whatever body it sent
+            # (a JSON error payload, say) is preserved on `raw` even though
+            # the call still counts as an error for scoring.
+            return Outcome(latency_ms=_elapsed_ms(started), error=str(exc), raw=raw_body)
+        latency_ms = _elapsed_ms(started)
+        if raw_body is None:
+            # A 2xx response whose body was not JSON, or not a JSON object
+            # -- there is nothing here `score()` could give credit for.
+            return Outcome(
+                latency_ms=latency_ms, error="response body was not a JSON object"
+            )
+        try:
+            return _to_outcome(raw_body, latency_ms)
         except (ValueError, TypeError, KeyError, ValidationError) as exc:
-            # A 2xx response this module cannot parse into any of the three
-            # known shapes -- treated the same as a transport failure: there
-            # is nothing here `score()` could give credit for either way.
-            return Outcome(latency_ms=latency_ms, error=f"malformed response body: {exc}")
+            # A 2xx, JSON-object response this module still cannot place
+            # into any of the three known shapes -- treated the same as a
+            # transport failure for scoring, but `raw` is kept: the body
+            # was real, this function just could not translate it.
+            return Outcome(
+                latency_ms=latency_ms, error=f"malformed response body: {exc}", raw=raw_body
+            )
 
 
 async def run_benchmark(
@@ -181,19 +208,32 @@ def stratified_sample(
     cases: Sequence[GoldenCase], n: int, *, seed: int, registry: Registry
 ) -> list[GoldenCase]:
     """A seeded sample of about `n` cases, drawn proportionally across
-    **difficulty** strata (easy/medium/hard), keeping every paraphrase
-    family whole -- a family is included or excluded as one unit, never
-    split.
+    **(expectation kind, difficulty)** strata -- `("ok", "easy")`,
+    `("clarify", "medium")`, `("refusal", "medium")`, and so on -- keeping
+    every paraphrase family whole: a family is included or excluded as one
+    unit, never split.
 
-    **Judgement call** (see task-6-report.md): the brief asks for
-    "proportionally across derived slices", but `golden.SLICES` overlap by
-    design -- a case can be `join` and `coded-vocabulary` and
-    `multi-condition` at once -- so they cannot back a *proportional
-    allocation* without double-counting a case into more than one bucket's
-    budget. `derive_difficulty` is the one derived axis in `golden.py` that
-    actually partitions the set (every case gets exactly one of
-    easy/medium/hard), so it stands in for "slices" here as the
-    stratification key.
+    **Judgement call** (see task-6-report.md). Two amendments to the
+    brief's literal "proportionally across derived slices":
+
+    1. `golden.SLICES` overlap by design -- a case can be `join` and
+       `coded-vocabulary` and `multi-condition` at once -- so they cannot
+       back a *proportional allocation* without double-counting a case into
+       more than one bucket's budget. `derive_difficulty` is the one
+       derived axis in `golden.py` that partitions the ok-case structural
+       variety (easy/medium/hard) without overlap.
+    2. Difficulty alone is not enough, because it is silent about
+       `clarify`/`refusal` cases relative to `ok` ones in a way that starves
+       exactly the population a small sample most needs to keep alive: at
+       `--stratify 40` over a set where refusals split across three
+       reasons, a difficulty-only draw proportions ~2.6 refusal cases
+       across all three, landing most reasons at n=0 or n=1 -- refusal
+       precision/recall and candidate recall become unestimable in
+       precisely the affordable sample a reviewer would actually run.
+       Crossing **expectation kind** (`case.expect.kind`: `"ok"`,
+       `"clarify"`, `"refusal"`) with difficulty keeps every kind
+       represented proportionally to its own share of the set, independent
+       of how the ok cases happen to distribute across difficulty.
 
     A family's stratum is read off its **canonical** member (or, failing
     that, an arbitrary member of the family present in `cases` -- expected
@@ -223,12 +263,13 @@ def stratified_sample(
             family_order.append(fid)
         families[fid].append(case)
 
-    strata: dict[str, list[str]] = defaultdict(list)
+    strata: dict[tuple[str, str], list[str]] = defaultdict(list)
     family_size: dict[str, int] = {}
     for fid in family_order:
         members = families[fid]
         canonical_case = next((c for c in members if c.id == fid), members[0])
-        strata[derive_difficulty(canonical_case, registry)].append(fid)
+        stratum_key = (canonical_case.expect.kind, derive_difficulty(canonical_case, registry))
+        strata[stratum_key].append(fid)
         family_size[fid] = len(members)
 
     total_cases = sum(family_size.values())

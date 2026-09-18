@@ -10,10 +10,12 @@ golden set, sample it (`--canonical-only` first, `--stratify` second -- see
 reverse: stratifying first would draw proportionally across a set that
 still includes paraphrases, then discarding the paraphrases afterwards would
 silently unbalance the strata the sampler just built), check `/healthz`
-(refusing on anything but `"status": "ok"`), print and gate an OpenAI spend
-estimate, fan the sample out through `runner.run_benchmark`, score every
-result, record the run and its rows, and render the single-run report to
-`eval_data/reports/<run_id>.md`.
+(refusing on anything but `"status": "ok"`), print and gate a spend estimate
+-- gated on what `/healthz` actually reports as the serving provider, not on
+`--provider-tag`: a typo'd tag must not place billable calls against the
+real deploy -- fan the sample out through `runner.run_benchmark`, score
+every result, record the run and its rows, and render the single-run report
+to `eval_data/reports/<run_id>.md`.
 
 **Compare mode** (`--compare RUN_A RUN_B [--seed S]`): load both runs from
 the store and render the frozen three-layer comparison
@@ -40,7 +42,13 @@ from ..translate.router import ROUTER_SYSTEM
 from ..translate.translator import TRANSLATOR_SYSTEM
 from . import EVALUATOR_VERSION
 from .golden import SLICE_RUBRIC_VERSION, ExpectOk, GoldenCase, load_golden
-from .report import IdentityMismatch, estimate_spend, render_compare, render_single_run
+from .report import (
+    IdentityMismatch,
+    estimate_spend,
+    has_pricing_for,
+    render_compare,
+    render_single_run,
+)
 from .runner import canonical_only, run_benchmark, stratified_sample
 from .scoring import score
 from .store import open_store
@@ -57,7 +65,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--provider-tag", choices=("openai", "ollama"),
         help="Which deploy this run is against -- required unless --compare is given. "
-        "Only 'openai' triggers the spend gate.",
+        "The spend gate is keyed off /healthz's own reported provider, not this flag "
+        "(a wrong tag must not skip the gate).",
     )
     parser.add_argument("--limit", type=int, default=None, help="Cap the sampled case count.")
     parser.add_argument(
@@ -75,7 +84,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--yes-spend", action="store_true",
-        help="Required to actually place calls on --provider-tag openai.",
+        help="Required to actually place calls against any deploy /healthz does not "
+        "report as 'ollama'.",
     )
     parser.add_argument("--notes", default=None, help="Freeform note stored with the run.")
     parser.add_argument(
@@ -183,11 +193,25 @@ def _run_compare(args: argparse.Namespace, settings) -> int:
 def _sample(cases: list[GoldenCase], args: argparse.Namespace, registry) -> list[GoldenCase]:
     if args.canonical_only:
         cases = canonical_only(cases)
-    if args.stratify:
+    if args.stratify is not None:
         cases = stratified_sample(cases, args.stratify, seed=args.seed, registry=registry)
-    if args.limit:
+    if args.limit is not None:
         cases = cases[: args.limit]
     return cases
+
+
+def _validate_sample_args(args: argparse.Namespace) -> str | None:
+    """`None` when `--stratify`/`--limit` are usable, else the error to
+    print. Checked with `is not None`, not truthiness: an explicit `0`
+    (`--stratify 0`, `--limit 0`) must fail loudly -- a caller who typed it
+    almost certainly meant something else -- rather than being silently
+    read the same as "flag not given" and quietly running the full set.
+    """
+    if args.stratify is not None and args.stratify <= 0:
+        return f"--stratify must be a positive integer, got {args.stratify}"
+    if args.limit is not None and args.limit <= 0:
+        return f"--limit must be a positive integer, got {args.limit}"
+    return None
 
 
 def _check_healthz(settings) -> dict | None:
@@ -219,6 +243,10 @@ def _run_benchmark_cli(args: argparse.Namespace, settings) -> int:
     if not args.provider_tag:
         print("error: --provider-tag is required unless --compare is given", file=sys.stderr)
         return 2
+    sample_error = _validate_sample_args(args)
+    if sample_error is not None:
+        print(f"error: {sample_error}", file=sys.stderr)
+        return 2
 
     try:
         registry = _fetch_registry(settings)
@@ -246,11 +274,22 @@ def _run_benchmark_cli(args: argparse.Namespace, settings) -> int:
     }
     registry_version = health_body.get("registry_version") or ""
 
-    if args.provider_tag == "openai":
-        estimated = estimate_spend(len(cases), model_config.get("model") or "default")
+    # Gated on what /healthz actually reports, not on --provider-tag: the
+    # tag is the human's label for which deploy this is meant to be, but a
+    # typo'd "ollama" against the real OpenAI deploy must not place ~180
+    # billable calls just because the flag said the wrong thing. Anything
+    # that isn't "ollama" -- including a blank/unknown provider -- gates,
+    # fail-closed.
+    actual_provider = model_config.get("provider")
+    if actual_provider != "ollama":
+        model_id = model_config.get("model") or "default"
+        if not has_pricing_for(model_id):
+            print(f"no rate on file for {model_id}; using placeholder rates")
+        estimated = estimate_spend(len(cases), model_id)
         print(
-            f"Estimated spend for {len(cases)} case(s) on model "
-            f"{model_config.get('model')!r}: ${estimated:.2f}"
+            f"Estimated spend for {len(cases)} case(s) on model {model_id!r} "
+            f"(provider {actual_provider!r}, --provider-tag {args.provider_tag!r}): "
+            f"${estimated:.2f}"
         )
         if not args.yes_spend:
             print("Refusing to place billable calls without --yes-spend.")
@@ -304,13 +343,12 @@ def _run_benchmark_cli(args: argparse.Namespace, settings) -> int:
         stratify=args.stratify,
         canonical_only=args.canonical_only,
     )
-    # The wire body is not retained separately from the parsed `Outcome`
-    # (`run_benchmark`'s return type is `list[Outcome]`, per the brief's own
-    # interface) -- `raw_outcome` here is the runner's own post-translation
-    # `Outcome`, dumped, not the untouched `/translate` response body.
-    store.record_rows(
-        run_id, rows, raw_outcomes=[o.model_dump(mode="json") for o in outcomes]
-    )
+    # `raw_outcome` is the untouched wire body (`Outcome.raw`), not a dump
+    # of the translated `Outcome` -- the store column's documented purpose
+    # is re-scoring under a future evaluator version, and translating into
+    # status/payload/candidates/reason already drops `Refused.detail`,
+    # `Unresolved.phrase`, `flags`, and `registry_version`.
+    store.record_rows(run_id, rows, raw_outcomes=[o.raw for o in outcomes])
 
     run_record, _ = store.load_run(run_id)
     text = render_single_run(run_record, rows, cases, registry)

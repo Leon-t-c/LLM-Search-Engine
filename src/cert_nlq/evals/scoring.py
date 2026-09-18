@@ -74,6 +74,17 @@ class Outcome(BaseModel):
     #: `_groups_recall_hit` falls back to its documented proxy there.
     route: dict | None = None
     error: str | None = None
+    #: The exact parsed JSON body the wire returned -- kept alongside the
+    #: translated fields above so a later evaluator-version bump can
+    #: re-score from what the service actually said, not from this
+    #: module's own snapshot of it: translating into `status`/`payload`/
+    #: `candidates`/`reason` already drops `Refused.detail`,
+    #: `Unresolved.phrase`, `flags`, and `registry_version`. `None` when
+    #: no body was ever received (a transport-level failure -- a timeout,
+    #: a connection error) or the body was not a JSON object at all;
+    #: otherwise the body exists even on a non-2xx response, so a 502
+    #: with a JSON error payload still carries whatever the wire sent.
+    raw: dict | None = None
 
 
 @dataclass(frozen=True, slots=True)

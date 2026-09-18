@@ -29,6 +29,27 @@ def _ok_case(case_id, payload, *, question=None, source="hand-written", paraphra
     })
 
 
+def _clarify_case(case_id, *, field="widget.status", source="hand-written", paraphrase_of=None):
+    return GoldenCase.model_validate({
+        "id": case_id,
+        "question": f"question for {case_id}",
+        "source": "paraphrase" if paraphrase_of else source,
+        "paraphrase_of": paraphrase_of,
+        "expect": {"kind": "clarify", "field": field},
+    })
+
+
+def _refusal_case(case_id, *, reason="field_not_in_schema", source="hand-written",
+                   paraphrase_of=None):
+    return GoldenCase.model_validate({
+        "id": case_id,
+        "question": f"question for {case_id}",
+        "source": "paraphrase" if paraphrase_of else source,
+        "paraphrase_of": paraphrase_of,
+        "expect": {"kind": "refusal", "reason": reason},
+    })
+
+
 def _simple_filter_payload():
     """Exactly one condition, no join/aggregate -- `derive_difficulty`'s
     `easy` bucket."""
@@ -195,6 +216,9 @@ def test_ok_response_translates_and_captures_usage_and_route():
     assert outcome.usage == tuple(usage)
     assert outcome.route == route
     assert outcome.error is None
+    assert outcome.raw == {
+        "status": "ok", "payload": {"root": "widget"}, "usage": usage, "route": route,
+    }
 
 
 def test_needs_clarification_body_parses_into_candidates():
@@ -227,6 +251,8 @@ def test_needs_clarification_body_parses_into_candidates():
     assert outcome.status == "clarify"
     assert outcome.candidates == tuple(candidates)
     assert outcome.payload == {"root": "widget"}
+    assert outcome.raw is not None
+    assert outcome.raw["unresolved"]["candidates"] == candidates
 
 
 def test_refused_response_translates_status_and_reason():
@@ -245,6 +271,9 @@ def test_refused_response_translates_status_and_reason():
     (outcome,) = _run(go())
     assert outcome.status == "refusal"
     assert outcome.reason == "not_a_query"
+    assert outcome.raw == {
+        "status": "refused", "reason": "not_a_query", "detail": "hi", "usage": [],
+    }
 
 
 def test_wire_status_the_wire_never_leaks_its_own_spelling():
@@ -350,6 +379,71 @@ def test_unrecognised_wire_status_becomes_an_error_outcome():
     assert outcome.status is None
 
 
+def test_a_502_with_a_json_body_still_preserves_it_on_raw():
+    """`raw` is populated even on a non-2xx response, as long as the wire
+    sent a JSON body -- the error status alone must not throw the body
+    away, since a later re-score wants to see what the service actually
+    said.
+    """
+    cases = [_ok_case("c0", _simple_filter_payload())]
+    error_body = {"detail": "upstream provider unavailable"}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(502, json=error_body)
+
+    async def go():
+        async with _make_client(handler) as client:
+            return await run_benchmark(cases, client=client, concurrency=1)
+
+    (outcome,) = _run(go())
+    assert outcome.error is not None
+    assert outcome.raw == error_body
+
+
+def test_a_timeout_leaves_raw_as_none():
+    """A pure transport failure never received a body at all -- `raw` must
+    stay `None`, not a fabricated empty dict."""
+    cases = [_ok_case("c0", _simple_filter_payload())]
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("simulated timeout", request=request)
+
+    async def go():
+        async with _make_client(handler) as client:
+            return await run_benchmark(cases, client=client, concurrency=1)
+
+    (outcome,) = _run(go())
+    assert outcome.raw is None
+
+
+def test_malformed_json_body_leaves_raw_as_none():
+    cases = [_ok_case("c0", _simple_filter_payload())]
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="not json at all")
+
+    async def go():
+        async with _make_client(handler) as client:
+            return await run_benchmark(cases, client=client, concurrency=1)
+
+    (outcome,) = _run(go())
+    assert outcome.raw is None
+
+
+def test_unrecognised_wire_status_still_preserves_raw():
+    cases = [_ok_case("c0", _simple_filter_payload())]
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"status": "something_new"})
+
+    async def go():
+        async with _make_client(handler) as client:
+            return await run_benchmark(cases, client=client, concurrency=1)
+
+    (outcome,) = _run(go())
+    assert outcome.raw == {"status": "something_new"}
+
+
 # --------------------------------------------------------------------------
 # canonical_only()
 # --------------------------------------------------------------------------
@@ -410,6 +504,65 @@ def test_stratified_sample_never_exceeds_the_available_cases(registry):
     cases = _families(registry)
     sample = stratified_sample(cases, 100, seed=1, registry=registry)
     assert {c.id for c in sample} <= {c.id for c in cases}
+
+
+# --------------------------------------------------------------------------
+# stratified_sample(): strata are (expectation kind, difficulty), not
+# difficulty alone -- a difficulty-only partition pools refusal/clarify
+# cases into a bucket dominated by ok cases of the same difficulty, and
+# their representation in a small sample then depends on shuffle luck
+# rather than being a guaranteed proportional share.
+# --------------------------------------------------------------------------
+
+
+def test_stratified_sample_keeps_a_lone_refusal_family_alive_across_seeds(registry):
+    """3 ok-medium families + 1 refusal-medium family, all sharing one
+    difficulty bucket. At --stratify 3, the refusal stratum's own
+    proportional target is 1 (largest-remainder: its 0.75 fraction beats
+    the ok stratum's 0.25) -- the refusal family must be present for every
+    seed, not just a lucky one.
+    """
+    ok_cases = [_ok_case(f"ok-{i}", _multi_condition_payload()) for i in range(3)]
+    refusal_case = _refusal_case("refusal-1")
+    cases = [*ok_cases, refusal_case]
+
+    for seed in range(5):
+        sample = stratified_sample(cases, 3, seed=seed, registry=registry)
+        sampled_ids = {c.id for c in sample}
+        assert "refusal-1" in sampled_ids, (seed, sampled_ids)
+        assert len(sample) == 3
+
+
+def test_stratified_sample_keeps_a_lone_clarify_family_alive_across_seeds(registry):
+    ok_cases = [_ok_case(f"ok-{i}", _multi_condition_payload()) for i in range(3)]
+    clarify_case = _clarify_case("clarify-1")
+    cases = [*ok_cases, clarify_case]
+
+    for seed in range(5):
+        sample = stratified_sample(cases, 3, seed=seed, registry=registry)
+        sampled_ids = {c.id for c in sample}
+        assert "clarify-1" in sampled_ids, (seed, sampled_ids)
+        assert len(sample) == 3
+
+
+def test_stratified_sample_separates_refusal_from_ok_cases_of_the_same_difficulty(registry):
+    """Refusal cases (medium by default) and the ok-medium cases above sit
+    in different strata now, even though `derive_difficulty` alone would
+    call both "medium" -- proven by the previous two tests' guaranteed
+    inclusion; this test pins the family-of-one-kind-per-stratum bookkeeping
+    directly by checking a paraphrase of the refusal case is pulled in
+    whole alongside it.
+    """
+    ok_cases = [_ok_case(f"ok-{i}", _multi_condition_payload()) for i in range(3)]
+    refusal_case = _refusal_case("refusal-1")
+    refusal_paraphrase = _refusal_case("refusal-1-p1", paraphrase_of="refusal-1")
+    cases = [*ok_cases, refusal_case, refusal_paraphrase]
+
+    sample = stratified_sample(cases, 4, seed=2, registry=registry)
+    sampled_ids = {c.id for c in sample}
+    refusal_members = {"refusal-1", "refusal-1-p1"}
+    overlap = sampled_ids & refusal_members
+    assert overlap in (set(), refusal_members), overlap
 
 
 # --------------------------------------------------------------------------
