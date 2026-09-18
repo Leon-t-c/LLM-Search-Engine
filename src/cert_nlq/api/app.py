@@ -83,10 +83,33 @@ def _require_token(expected: str):
 
 
 def create_app(
-    registry_client, provider: Provider, service_token: str = ""
+    registry_client,
+    provider: Provider,
+    service_token: str = "",
+    *,
+    provider_name: str = "",
+    model: str = "",
+    router_model: str = "",
 ) -> FastAPI:
+    """Build the app.
+
+    The three model-configuration strings are reported on `/healthz` and are
+    passed in rather than read from settings here, for the same reason the
+    registry client and the provider are: this factory must build an app
+    that cannot reach the network or the environment. They are **names, not
+    credentials** — see the healthz body for the rule.
+    """
     app = FastAPI(title="cert-nlq", version="0.1.0")
     guard = _require_token(service_token)
+    # Built once, and deliberately a fixed literal set rather than a dump of
+    # anything: every key here was chosen by hand, so a setting added later
+    # cannot appear on a public, unauthenticated endpoint by default. Keys
+    # and tokens are never members of this dict.
+    config = {
+        "provider": provider_name,
+        "model": model,
+        "router_model": router_model,
+    }
 
     @app.get("/healthz")
     def healthz():
@@ -115,9 +138,13 @@ def create_app(
             # a load balancer reads 200 and keeps routing live traffic here.
             return JSONResponse(
                 status_code=503,
-                content={"status": "degraded", "registry_version": None},
+                content={"status": "degraded", "registry_version": None, **config},
             )
-        return {"status": "ok", "registry_version": cached.version}
+        # The model configuration rides along so that a scored run can
+        # *record* which models answered it rather than trusting whoever
+        # started the run to remember. A run tagged with the wrong model is
+        # worse than an untagged one: it is a comparison that looks valid.
+        return {"status": "ok", "registry_version": cached.version, **config}
 
     @app.post("/translate", dependencies=[Depends(guard)])
     def translate_endpoint(request: TranslateRequest) -> dict:
@@ -137,11 +164,26 @@ def create_app(
         # path below: leaving a stale list set would let the next request
         # sharing this thread capture into it, or capture into nothing.
         usage: list = []
+        # Same shape as the usage capture, for the same reason: a list the
+        # callback appends to, so the endpoint can see something `translate`
+        # does not return. At most one route is ever recorded (stage 1 runs
+        # once per request), and none at all when routing itself failed.
+        routes: list = []
         token = _request_usage.set(usage)
         try:
             try:
                 response = translate(
-                    request.question, registry, provider, now_year=request.now_year
+                    request.question,
+                    registry,
+                    provider,
+                    now_year=request.now_year,
+                    on_route=lambda chosen: routes.append(
+                        {
+                            "root": chosen.root,
+                            "joins": list(chosen.joins),
+                            "groups": list(chosen.groups),
+                        }
+                    ),
                 )
             except ProviderError as exc:
                 logger.exception("translation provider failed")
@@ -173,6 +215,13 @@ def create_app(
         # from here, so this covers all three — the harness needs the token
         # cost of the calls that produced whichever shape came back.
         body["usage"] = usage
+        # The stage-1 decision, on all three response shapes — the harness
+        # scores group selection against it directly instead of inferring it
+        # from the payload, which it could only ever bound from below.
+        # Best-effort by construction: `null` where the request never got as
+        # far as a route (a malformed routing answer refuses before there is
+        # one), because "no route" is a fact about the request, not a hole.
+        body["route"] = routes[-1] if routes else None
         return body
 
     return app
@@ -277,4 +326,19 @@ def make_app() -> FastAPI:
         RegistryClient(settings.registry_url, settings.registry_token),
         _build_provider(settings),
         settings.service_token,
+        provider_name=settings.provider,
+        # The model this deploy actually calls, not the field named `model`:
+        # the Claude adapter is configured through `claude_model` and leaves
+        # `model` blank, so reporting `model` would tell a run it was served
+        # by "" while it was billed for an Opus. `_build_provider` makes this
+        # same choice one branch at a time; it is repeated rather than
+        # returned because a health probe must not construct a provider.
+        model=(
+            settings.claude_model
+            if settings.provider == "claude"
+            else settings.model
+        ),
+        # Blank means "stage 1 used `model`" — reported as configured rather
+        # than resolved, because that is the setting a run is reproducing.
+        router_model=settings.router_model,
     )

@@ -20,34 +20,62 @@ for every run afterwards:
    cases into fifty-odd runs.
 """
 import json
+import re
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from ..ir.payload import Payload
 from ..ir.validate import PayloadError, validate_payload
-from ..registry.models import Registry
+from ..registry.models import Registry, RootSpec
 from ..translate.refusals import RefusalReason
 
-#: The per-slice axis. Exactly one of these tags per case, so a report broken
-#: down by slice partitions the set rather than double-counting it. A refusal
-#: slice is named per reason -- "refusals are 80% correct" over four unrelated
-#: reasons hides which one is broken.
-SLICE_TAGS = frozenset(
-    {"selection", "values", "aggregate", "join", "clarify"}
-    | {f"refusal:{reason.value}" for reason in RefusalReason}
-)
+#: Bumped whenever `derive_slices` or `derive_difficulty` changes what it
+#: says about an unchanged case. A stored run records it, so a later
+#: re-slicing of the same rows is visibly a different ruler rather than a
+#: quiet re-interpretation of old numbers.
+SLICE_RUBRIC_VERSION = "1"
 
-#: Which slice tag goes with which expectation. A case tagged `aggregate` that
-#: expects a refusal is one of the two halves being wrong, and which half does
-#: not matter -- either way the slice it is counted in is not the thing it
-#: measures.
-_KIND_FOR_TAG = dict.fromkeys(("selection", "values", "aggregate", "join"), "ok")
-_KIND_FOR_TAG["clarify"] = "clarify"
-_KIND_FOR_TAG.update(
-    {f"refusal:{reason.value}": "refusal" for reason in RefusalReason}
-)
+#: The derived slice axis. These OVERLAP by design -- a case can be
+#: `multi-condition` and `join` and `coded-vocabulary` at once -- so a report
+#: broken down by slice does *not* partition the set and must not be summed
+#: as though it did. Every one of them is computed from the gold
+#: payload/expectation by `derive_slices`; none is stored, because a stored
+#: copy of a derived fact drifts the first time the derivation is corrected.
+SLICES = frozenset({
+    "simple-filter",
+    "multi-condition",
+    "nested-logic",
+    "in-op",
+    "join",
+    "aggregation",
+    "group-by",
+    "having",
+    "coded-vocabulary",
+    "clarification",
+    "refusal",
+})
+
+#: The closed set of hand tags. `tags` carries **only** these: the slice axis
+#: is derived, so a slice tag written by hand is a second copy of a fact the
+#: file already contains, and the two would disagree the first time a payload
+#: was edited.
+#:
+#: * `review` -- the author was not confident; the owner has not confirmed it.
+#: * `regression` -- a real failure this service has already had. Never
+#:   reword one of these questions; the whitespace is part of the case.
+#: * `ambiguous-wording` -- the *question* admits more than one honest
+#:   reading. It cannot be derived from a payload (the payload records one
+#:   reading; the ambiguity is in the English), so it is the one hand tag on
+#:   the slice axis, and `derive_difficulty` reads it.
+AUX_TAGS = frozenset({"review", "regression", "ambiguous-wording"})
+
+#: Numbers, years and code-shaped literals in a question. The paraphrase
+#: guard requires every one of these to survive a rewording verbatim -- see
+#: `_check_paraphrases`.
+_NUMBER_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
+_CODE_RE = re.compile(r"<[^<>\s]+>|\b[A-Za-z]+-\d+\b|\"[^\"]+\"|'[^']+'")
 
 #: The slots a payload actually has. `Payload` ignores anything else -- the
 #: service must stay tolerant on its wire, where an unexpected key is the host's
@@ -125,6 +153,286 @@ class GoldenCase(BaseModel):
     #: surprises -- a reader who edits the expectation back to the "obvious"
     #: one has to delete the sentence saying why it is not.
     note: str | None = None
+    #: Where this case came from. Required, with no default: provenance is
+    #: the thing nobody remembers six weeks later, and the analysis actually
+    #: turns on it -- Task 4b's primary comparison excludes paraphrases, and
+    #: it can only do that if every case says what it is.
+    #:
+    #: * `hand-written` -- written for the set by a person.
+    #: * `paraphrase` -- a rewording of another case; see `paraphrase_of`.
+    #: * `correction` -- written in response to an observed wrong answer.
+    #: * `live-capture` -- a question a real caller actually asked.
+    source: Literal["hand-written", "paraphrase", "correction", "live-capture"]
+    #: Overrides `derive_difficulty` for this one case. The rubric is
+    #: structural and the questions are English, so it is sometimes wrong;
+    #: the escape hatch costs a sentence, and that sentence is mandatory --
+    #: an unexplained override is indistinguishable from a typo, and it
+    #: silently moves a case between the buckets a report compares.
+    difficulty_override: Literal["easy", "medium", "hard"] | None = None
+    #: The root the question should route to, for the cases whose gold
+    #: expectation carries no payload to read it off. Only clarify and
+    #: refusal cases have anything to add here; on an ok case the payload
+    #: already says it, so a second copy is legal only when it agrees (and
+    #: is then worth nothing). Left `None` where there is no right answer --
+    #: "hello" routes nowhere.
+    gold_root: str | None = None
+    #: The case this one rephrases. The family key for cluster bootstrap is
+    #: `family(case)`: this id, or the case's own when it is an original.
+    #: One level only -- a paraphrase of a paraphrase would make the family
+    #: depend on which link you walked from.
+    paraphrase_of: str | None = None
+
+    @model_validator(mode="after")
+    def _check_case_invariants(self) -> "GoldenCase":
+        """The invariants that need no registry, enforced everywhere.
+
+        On the model rather than in the loader because a `GoldenCase` built
+        in code -- a test fixture, a runner's synthetic case -- is exactly
+        as capable of asserting nonsense as a line in the file is.
+        """
+        if self.difficulty_override is not None and not self.note:
+            raise ValueError(
+                "difficulty_override needs a note saying why the rubric is "
+                "wrong here"
+            )
+        if self.gold_root is not None and isinstance(self.expect, ExpectOk):
+            payload_root = self.expect.payload.get("root")
+            if self.gold_root != payload_root:
+                raise ValueError(
+                    f"gold_root {self.gold_root!r} disagrees with the gold "
+                    f"payload's root {payload_root!r}; on an ok case the "
+                    f"payload is the answer"
+                )
+        if (self.source == "paraphrase") != (self.paraphrase_of is not None):
+            raise ValueError(
+                "source 'paraphrase' and paraphrase_of go together: one "
+                "without the other leaves the family key guessing"
+            )
+        if self.paraphrase_of == self.id:
+            raise ValueError("paraphrase_of points at the case itself")
+        return self
+
+
+def family(case: GoldenCase) -> str:
+    """The cluster key: the original's id, or the case's own.
+
+    Every metric that must not count one question twice -- and the
+    bootstrap, which resamples clusters rather than rows -- groups on this.
+    """
+    return case.paraphrase_of or case.id
+
+
+def iter_condition_dicts(node):
+    """Every leaf condition dict under a raw (dict-shaped) `where` node.
+
+    Tolerant by construction: this walks the same shape whether it came off
+    a gold line or off the wire -- "has `children`" means group, "has
+    `field`" means condition -- rather than assuming a shape and raising
+    when it is wrong. Lives here, with the gold model, because both the
+    derivations below and `scoring` need it and only one copy can be right.
+    """
+    if not isinstance(node, dict):
+        return
+    if "children" in node:
+        for child in node.get("children") or ():
+            yield from iter_condition_dicts(child)
+    elif "field" in node:
+        yield node
+
+
+def _where_depth(node) -> int:
+    """Nesting depth of a `where` tree: 0 for nothing, 1 for a flat group.
+
+    A leaf condition contributes no depth of its own -- the depth being
+    counted is of *groups*, because that is what "the question needed mixed
+    logic" means. So `AND[a, b]` is 1 and `AND[a, OR[b, c]]` is 2, which is
+    exactly the `> 1` the nested-logic slice tests.
+    """
+    if not isinstance(node, dict):
+        return 0
+    if "children" not in node:
+        return 0
+    children = node.get("children") or ()
+    return 1 + max((_where_depth(c) for c in children), default=0)
+
+
+def _payload_fields(payload: dict) -> list[str]:
+    """Every field key the payload names anywhere, conditions included."""
+    keys = [
+        c["field"]
+        for c in iter_condition_dicts(payload.get("where"))
+        if isinstance(c.get("field"), str)
+    ]
+    for slot in ("columns", "group_by"):
+        keys += [k for k in (payload.get(slot) or ()) if isinstance(k, str)]
+    keys += [
+        a.get("field")
+        for a in (payload.get("aggregate") or ())
+        if isinstance(a, dict) and isinstance(a.get("field"), str)
+        and a.get("field") != "*"
+    ]
+    sort = payload.get("sort")
+    if isinstance(sort, dict) and isinstance(sort.get("field"), str):
+        keys.append(sort["field"])
+    return keys
+
+
+def _tables(keys, root: RootSpec | None) -> set[str]:
+    if root is None:
+        return set()
+    by_key = root.fields_by_key
+    return {by_key[k].table for k in keys if k in by_key}
+
+
+def _joined_tables(payload: dict, root: RootSpec | None) -> set[str]:
+    """The tables this payload actually reaches beyond the root's own.
+
+    Read from the fields rather than trusting the `join` slot alone: the
+    slot is what the model was asked to declare, and a gold payload that
+    names a joined field without the slot would still be a join case. Both
+    are read, and the union is the answer.
+    """
+    if root is None:
+        return {t for t in (payload.get("join") or ()) if isinstance(t, str)}
+    available = {j.table for j in root.joins}
+    declared = {
+        t for t in (payload.get("join") or ()) if isinstance(t, str)
+    }
+    return (declared | _tables(_payload_fields(payload), root)) & available
+
+
+def derive_slices(case: GoldenCase, registry: Registry) -> frozenset[str]:
+    """Which slices this case belongs to, computed, never stored.
+
+    Slices overlap on purpose: a question can be a multi-condition join with
+    a coded value in it, and the point of the axis is to be able to ask
+    "how does it do on joins" without first deciding that the case is *only*
+    a join case. The consequence is that per-slice counts do not sum to the
+    set size, and a report that adds them up is wrong.
+
+    A clarify case is `clarification` and a refusal is `refusal`, and
+    neither picks up any structural slice: there is no gold payload to read
+    one off, and inferring structure from the *question* would be the model's
+    job, not the ruler's.
+    """
+    expect = case.expect
+    if isinstance(expect, ExpectRefusal):
+        return frozenset({"refusal"})
+    if isinstance(expect, ExpectClarify):
+        return frozenset({"clarification"})
+
+    payload = expect.payload
+    root_name = payload.get("root")
+    root = registry.root(root_name) if isinstance(root_name, str) else None
+    conditions = list(iter_condition_dicts(payload.get("where")))
+    joins = _joined_tables(payload, root)
+    aggregate = payload.get("aggregate") or ()
+    group_by = payload.get("group_by") or ()
+    having = payload.get("having") or ()
+
+    found = set()
+    # "and nothing else": one condition is only a *simple* filter when the
+    # payload does no other work -- a lone condition under a group_by is a
+    # breakdown question wearing one filter, and calling it simple would
+    # flatter the easiest slice with the hardest cases.
+    only_a_filter = not (
+        joins or aggregate or group_by or having
+        or payload.get("columns") or payload.get("sort")
+    )
+    if len(conditions) == 1 and only_a_filter:
+        found.add("simple-filter")
+    if len(conditions) >= 2:
+        found.add("multi-condition")
+    if _where_depth(payload.get("where")) > 1:
+        found.add("nested-logic")
+    if any(c.get("op") == "in" for c in conditions):
+        found.add("in-op")
+    if joins:
+        found.add("join")
+    if aggregate:
+        found.add("aggregation")
+    if group_by:
+        found.add("group-by")
+    if having:
+        found.add("having")
+    if root is not None:
+        by_key = root.fields_by_key
+        if any(
+            isinstance(c.get("field"), str)
+            and c["field"] in by_key
+            and by_key[c["field"]].vocabulary
+            for c in conditions
+        ):
+            found.add("coded-vocabulary")
+    return frozenset(found)
+
+
+def _mixed_grain_aggregate(payload: dict, root: RootSpec | None) -> bool:
+    """Does this payload aggregate across more than one grain?
+
+    Two shapes count, and both are the same mistake waiting to happen:
+
+    * the aggregated field and the `group_by` field come from different
+      tables (`avg(cityproperty.fullval) by boro`) -- the reader has to hold
+      two row-grains in their head at once; and
+    * the aggregate runs over a one-to-many join, where attaching the table
+      multiplies the root's rows and a `count` silently answers a different
+      question than the one asked.
+    """
+    aggregate = payload.get("aggregate") or ()
+    if not aggregate or root is None:
+        return False
+    agg_keys = [
+        a.get("field")
+        for a in aggregate
+        if isinstance(a, dict) and isinstance(a.get("field"), str)
+        and a.get("field") != "*"
+    ]
+    group_keys = [k for k in (payload.get("group_by") or ()) if isinstance(k, str)]
+    if len(_tables(agg_keys + group_keys, root)) > 1:
+        return True
+    fanning = {j.table for j in root.joins if j.cardinality == "one-to-many"}
+    return bool(_tables(agg_keys, root) & fanning)
+
+
+def derive_difficulty(case: GoldenCase, registry: Registry) -> str:
+    """`easy` / `medium` / `hard`, by the owner's rubric of 2026-09-18.
+
+    hard = nested logic, or a mixed-grain aggregate, or two-plus joins, or a
+    question hand-tagged `ambiguous-wording`; easy = exactly one condition
+    and no join and no aggregate; everything else is medium.
+
+    Read literally, "one condition" is something only an ok case has, so a
+    clarify or refusal case lands in `medium` unless it is hand-tagged
+    ambiguous or overridden. That is deliberate rather than an oversight:
+    refusing "hello" is easy and refusing a question about a table that
+    nearly exists is not, and nothing structural tells the two apart, so
+    the honest default is the middle bucket and the escape hatch is
+    `difficulty_override` with its mandatory note.
+    """
+    if case.difficulty_override is not None:
+        return case.difficulty_override
+    if "ambiguous-wording" in case.tags:
+        return "hard"
+    slices = derive_slices(case, registry)
+    if "nested-logic" in slices:
+        return "hard"
+    if isinstance(case.expect, ExpectOk):
+        payload = case.expect.payload
+        root_name = payload.get("root")
+        root = registry.root(root_name) if isinstance(root_name, str) else None
+        if len(_joined_tables(payload, root)) >= 2:
+            return "hard"
+        if _mixed_grain_aggregate(payload, root):
+            return "hard"
+        conditions = list(iter_condition_dicts(payload.get("where")))
+        if (
+            len(conditions) == 1
+            and not _joined_tables(payload, root)
+            and not (payload.get("aggregate") or ())
+        ):
+            return "easy"
+    return "medium"
 
 
 class GoldenError(ValueError):
@@ -180,9 +488,11 @@ def load_golden(path: str | Path, registry: Registry) -> list[GoldenCase]:
         else:
             first_seen[case.id] = lineno
         problems += _check_tags(case)
+        problems += _check_gold_root(case, registry)
         problems += _check_expectation(case, registry)
         cases.append(case)
 
+    problems += _check_paraphrases(cases)
     if problems:
         raise GoldenError(problems)
     return cases
@@ -196,25 +506,91 @@ def _summarise(exc: ValidationError) -> str:
 
 
 def _check_tags(case: GoldenCase) -> list[str]:
-    slices = sorted(set(case.tags) & SLICE_TAGS)
-    if not slices:
-        return [f"{case.id}: no slice tag (one of {', '.join(sorted(SLICE_TAGS))})"]
-    if len(slices) > 1:
-        return [f"{case.id}: more than one slice tag {slices}"]
+    """`tags` carries aux tags and nothing else.
 
-    tag = slices[0]
-    kind = case.expect.kind
-    if _KIND_FOR_TAG[tag] != kind:
+    The old one-slice-tag mandate is retired: slices are derived now, and a
+    hand-written slice tag would be a second, stale copy of a fact the gold
+    payload already states. Anything outside `AUX_TAGS` is rejected rather
+    than ignored -- including the retired slice names, so a file half-way
+    through the migration fails loudly instead of silently losing its
+    tagging.
+    """
+    strays = sorted(set(case.tags) - AUX_TAGS)
+    if strays:
         return [
-            f"{case.id}: slice tag {tag!r} expects a {_KIND_FOR_TAG[tag]!r} "
-            f"case, but this one is {kind!r}"
-        ]
-    if tag.startswith("refusal:") and tag.removeprefix("refusal:") != case.expect.reason:
-        return [
-            f"{case.id}: slice tag {tag!r} disagrees with refusal reason "
-            f"{case.expect.reason!r}"
+            f"{case.id}: unknown tag(s) {strays} -- `tags` carries only "
+            f"{', '.join(sorted(AUX_TAGS))}; slices are derived"
         ]
     return []
+
+
+def _check_gold_root(case: GoldenCase, registry: Registry) -> list[str]:
+    """A declared `gold_root` has to name a root the registry offers.
+
+    The ok-case agreement rule is on the model (it needs no registry); this
+    is the half that does.
+    """
+    if case.gold_root is None:
+        return []
+    if registry.root(case.gold_root) is None:
+        return [f"{case.id}: unknown gold_root {case.gold_root!r}"]
+    return []
+
+
+def _literals(question: str) -> list[str]:
+    """The tokens a rewording is not allowed to lose.
+
+    Numbers (so years, blocks, lots, amounts and thresholds), and the
+    code-shaped literals a question quotes -- `C-102`, `<CLIENT_1>`, or
+    anything in quotes. These are exactly the tokens whose loss changes
+    which rows come back while leaving the sentence reading fine.
+    """
+    return _NUMBER_RE.findall(question) + _CODE_RE.findall(question)
+
+
+def _check_paraphrases(cases: list[GoldenCase]) -> list[str]:
+    """`paraphrase_of` resolves, does not chain, and preserves the literals.
+
+    The literal check is the cheap mechanical half of the scope-confirmation
+    rule: "filed after 2024" and "filed in or after 2024" are different
+    queries, and a paraphrase that inherits its original's gold payload
+    while quietly moving a boundary reports the model wrong for being right.
+    A rewording may reorder, resynonymise and change register; it may not
+    drop the number. The other half -- did the *meaning* survive -- is a
+    human read, which is why every paraphrase is born `review`-tagged.
+    """
+    by_id = {case.id: case for case in cases}
+    problems = []
+    for case in cases:
+        original_id = case.paraphrase_of
+        if original_id is None:
+            continue
+        original = by_id.get(original_id)
+        if original is None:
+            problems.append(
+                f"{case.id}: paraphrase_of {original_id!r} names no case in "
+                f"this file"
+            )
+            continue
+        if original.paraphrase_of is not None:
+            problems.append(
+                f"{case.id}: paraphrase_of {original_id!r} is itself a "
+                f"paraphrase (of {original.paraphrase_of!r}); a family is one "
+                f"level deep, so point at the original"
+            )
+            continue
+        lost = [
+            token
+            for token in _literals(original.question)
+            if token not in case.question
+        ]
+        if lost:
+            problems.append(
+                f"{case.id}: paraphrase of {original_id!r} drops {lost} from "
+                f"the original question -- a number or code that moves is a "
+                f"different query, not a rewording"
+            )
+    return problems
 
 
 def _check_expectation(case: GoldenCase, registry: Registry) -> list[str]:

@@ -20,7 +20,7 @@ from pydantic import BaseModel, ConfigDict
 
 from ..registry.models import FieldSpec, RootSpec
 from ..translate.values import resolve_money
-from .golden import GoldenCase
+from .golden import GoldenCase, iter_condition_dicts
 
 #: Aggregate token-count keys a usage record may carry (`translate.provider`).
 #: The input keys are disjoint by construction -- every adapter converts into
@@ -66,6 +66,13 @@ class Outcome(BaseModel):
     candidates: tuple[dict, ...] = ()
     latency_ms: float = 0.0
     usage: tuple[dict, ...] = ()
+    #: The stage-1 decision the service echoed back: `{"root", "joins",
+    #: "groups"}`. A plain dict, not a `Route`: it is untrusted wire data,
+    #: and a malformed one must cost this row its *route* measurement, not
+    #: crash the run. `None` means the response carried no echo at all --
+    #: an older service, or a path that refused before routing -- and
+    #: `_groups_recall_hit` falls back to its documented proxy there.
+    route: dict | None = None
     error: str | None = None
 
 
@@ -110,6 +117,11 @@ class Row:
     refusal_reason_actual: str | None
     clarify_field_expected: str | None
     candidate_hit: bool | None
+    #: The primary outcome, frozen by `end_to_end_correct` and **stored**
+    #: rather than recomputed: a later change to the definition must show up
+    #: as a new `EVALUATOR_VERSION` beside old rows, never as old rows
+    #: quietly meaning something new.
+    e2e_correct: bool
     latency_ms: float
     tokens_in: int
     tokens_out: int
@@ -211,21 +223,10 @@ def _canon_node(node, root: RootSpec):
     }
 
 
-def _iter_condition_dicts(node):
-    """Every leaf condition dict under a raw (dict-shaped) `where` node.
-
-    Tolerant by construction: an actual-payload's `where` is untrusted input
-    (it came off the wire, possibly malformed), so this walks structurally
-    -- "has `children`" means group, "has `field`" means condition -- rather
-    than assuming a shape and raising when it is wrong.
-    """
-    if not isinstance(node, dict):
-        return
-    if "children" in node:
-        for child in node.get("children") or ():
-            yield from _iter_condition_dicts(child)
-    elif "field" in node:
-        yield node
+#: The tolerant `where` walker, shared with the gold model rather than
+#: reimplemented here -- an actual payload off the wire and a gold payload
+#: off a file are the same shape, and two copies of this walk would drift.
+_iter_condition_dicts = iter_condition_dicts
 
 
 def _coerce_value(value, spec: FieldSpec | None):
@@ -448,13 +449,63 @@ def _all_touched_fields(payload: dict | None) -> set[str]:
     return fields
 
 
-def _groups_recall_hit(
-    gold_fields: set[str], actual_payload: dict | None, root: RootSpec
-) -> bool | None:
-    """A **lower-bound proxy** for "did the route select the right group(s)".
+def _routed_groups(route: dict | None) -> frozenset[str] | None:
+    """The groups an echoed route names, or `None` if there is no usable echo.
 
-    The service does not echo which groups it routed to -- only the payload
-    it produced -- so this cannot measure group selection directly. Instead:
+    Every shape that is not "a dict with a list of strings under `groups`"
+    returns `None`, which sends the caller back to the proxy. Deliberately
+    not an exception and deliberately not an empty set: a garbled echo is
+    an unknown route, and scoring it as "routed to nothing" would report a
+    perfect service as missing every group.
+    """
+    if not isinstance(route, dict):
+        return None
+    groups = route.get("groups")
+    if not isinstance(groups, (list, tuple)):
+        return None
+    return frozenset(g for g in groups if isinstance(g, str))
+
+
+def _gold_groups(gold_fields: set[str], root: RootSpec) -> frozenset[str]:
+    """The registry groups a correct route had to select to reach these fields.
+
+    Identity groups are dropped: they are in scope whatever stage 1 chooses,
+    so requiring the router to name one would mark a correct route wrong for
+    not saying something it never had to say.
+    """
+    identity = root.identity_groups()
+    by_key = root.fields_by_key
+    return frozenset(
+        by_key[f].group
+        for f in gold_fields
+        if f in by_key and by_key[f].group and by_key[f].group not in identity
+    )
+
+
+def _groups_recall_hit(
+    gold_fields: set[str],
+    actual_payload: dict | None,
+    root: RootSpec,
+    route: dict | None = None,
+) -> bool | None:
+    """Did stage 1 select every group the gold answer needed?
+
+    **With a route echo this is the real measurement**, not a proxy: the
+    service reports the groups it chose, and the question is simply whether
+    every group a gold field lives in (identity groups excepted -- they are
+    always in scope) is among them. A group the router missed is a group
+    stage 2 was never shown, so the field was unreachable whatever the
+    payload happened to say.
+
+    **Without one it falls back to the lower-bound proxy below**, which is
+    what this was before the echo existed. Both paths are kept because a run
+    against an older deploy, or a response that refused before it ever
+    routed, has no echo to read -- and a metric that vanished in those cases
+    would silently change what a mixed run's average meant.
+
+    The proxy, for the no-echo path: the service does not say which groups
+    it routed to -- only the payload it produced -- so this cannot measure
+    group selection directly. Instead:
     a gold field (every field the gold payload names at all -- conditions,
     aggregates, `group_by`, `sort`, not just conditions) counts as reached if
     it appears anywhere in the actual payload, *or* if some field the actual
@@ -463,10 +514,8 @@ def _groups_recall_hit(
     was selected but this field was dropped" apart from "the group was never
     selected and another field from a different, coincidentally-matching,
     group happened to be used" -- it only ever produces a hit or a documented
-    non-hit, never proof. Treat a `True` here as "consistent with a correct
-    route", not as "the route was verified correct". A later addition -- the
-    service optionally echoing its selected groups -- would let this be
-    replaced with an exact measurement; that is not built here.
+    non-hit, never proof. Treat a proxy `True` as "consistent with a correct
+    route", not as "the route was verified correct".
 
     Returns `None` when there is nothing to derive it from: the gold payload
     names no field at all (an aggregate-only `count(*)` with no `where`,
@@ -474,6 +523,9 @@ def _groups_recall_hit(
     """
     if not gold_fields:
         return None
+    routed = _routed_groups(route)
+    if routed is not None:
+        return _gold_groups(gold_fields, root) <= routed
     actual_fields = _all_touched_fields(actual_payload)
     actual_groups = {
         root.fields_by_key[f].group for f in actual_fields if f in root.fields_by_key
@@ -486,6 +538,60 @@ def _groups_recall_hit(
             continue
         return False
     return True
+
+
+# --------------------------------------------------------------------------
+# end_to_end_correct(): the one frozen definition of "right answer"
+# --------------------------------------------------------------------------
+
+
+def end_to_end_correct(
+    case: GoldenCase,
+    outcome: Outcome,
+    *,
+    exact_match: bool | None,
+    candidate_hit: bool | None,
+) -> bool:
+    """Was this one question answered correctly? (Owner definition, 2026-09-18.)
+
+    Every consumer -- the primary McNemar test, the family metrics, the
+    headline accuracy -- reads this one function, through the `e2e_correct`
+    it writes onto each row. One definition, in one place, chosen before the
+    results were seen.
+
+    Per gold kind:
+
+    * **ok** -- the service returned `ok` *and* the payload exactly matches
+      under the canonicalisation already in force. Phase 3's
+      semantic-equivalence judge will only ever *upgrade* this, and it does
+      so by bumping `EVALUATOR_VERSION`: a new definition is a new version,
+      never a quiet edit, so no model can be favoured by a rule written
+      after its results were in.
+    * **clarify** -- the service asked for clarification *and* asked about
+      the right field. Asking about the wrong field is not correct
+      behaviour, however well-formed the question. Whether the pruned
+      remainder of the payload was right stays diagnostic, outside the
+      primary outcome.
+    * **refusal** -- the service refused *and* gave the expected reason.
+
+    The status gates are stated here even where the diagnostic they guard
+    is already gated the same way (`exact_match` is computed only for an
+    `ok` status): the asymmetries are the point of the definition, and they
+    must not depend on a gate living somewhere else. An ok-case that came
+    back as a clarification whose pruned payload happens to canonicalise
+    equal to gold is **incorrect** -- the caller was asked a question
+    instead of being given the answer.
+
+    `exact_match` and `candidate_hit` are passed in rather than recomputed
+    so that the row's diagnostics and its primary outcome can never
+    disagree about the same run.
+    """
+    kind = case.expect.kind
+    if kind == "ok":
+        return outcome.status == "ok" and bool(exact_match)
+    if kind == "clarify":
+        return outcome.status == "clarify" and bool(candidate_hit)
+    return outcome.status == "refusal" and outcome.reason == case.expect.reason
 
 
 # --------------------------------------------------------------------------
@@ -568,7 +674,7 @@ def score(case: GoldenCase, outcome: Outcome, root: RootSpec) -> Row:
             gold_payload, actual_payload, root
         )
         groups_recall_hit = _groups_recall_hit(
-            _all_touched_fields(gold_payload), actual_payload, root
+            _all_touched_fields(gold_payload), actual_payload, root, outcome.route
         )
 
     elif kind == "clarify":
@@ -614,6 +720,9 @@ def score(case: GoldenCase, outcome: Outcome, root: RootSpec) -> Row:
         refusal_reason_actual=refusal_reason_actual,
         clarify_field_expected=clarify_field_expected,
         candidate_hit=candidate_hit,
+        e2e_correct=end_to_end_correct(
+            case, outcome, exact_match=exact_match, candidate_hit=candidate_hit
+        ),
         latency_ms=outcome.latency_ms,
         tokens_in=tokens_in,
         tokens_out=tokens_out,

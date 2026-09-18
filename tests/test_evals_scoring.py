@@ -8,36 +8,44 @@ import pytest
 from pydantic import ValidationError
 
 from cert_nlq.evals.golden import GoldenCase
-from cert_nlq.evals.scoring import Outcome, canonical, score
+from cert_nlq.evals.scoring import (
+    Outcome,
+    canonical,
+    end_to_end_correct,
+    score,
+)
 
 # --------------------------------------------------------------------------
 # helpers
 # --------------------------------------------------------------------------
 
 
-def _ok_case(case_id, payload, tags=("selection",)):
+def _ok_case(case_id, payload, tags=()):
     return GoldenCase.model_validate({
         "id": case_id,
         "question": "a question",
         "tags": list(tags),
+        "source": "hand-written",
         "expect": {"kind": "ok", "payload": payload},
     })
 
 
-def _clarify_case(case_id, field, tags=("clarify",)):
+def _clarify_case(case_id, field, tags=()):
     return GoldenCase.model_validate({
         "id": case_id,
         "question": "a question",
         "tags": list(tags),
+        "source": "hand-written",
         "expect": {"kind": "clarify", "field": field},
     })
 
 
-def _refusal_case(case_id, reason, tags=None):
+def _refusal_case(case_id, reason, tags=()):
     return GoldenCase.model_validate({
         "id": case_id,
         "question": "a question",
-        "tags": list(tags or [f"refusal:{reason}"]),
+        "tags": list(tags),
+        "source": "hand-written",
         "expect": {"kind": "refusal", "reason": reason},
     })
 
@@ -201,7 +209,7 @@ def test_exact_match_true_for_alias_renamed_equivalent_payload(registry):
         "aggregate": [{"fn": "count", "field": "*", "as": "cnt"}],
         "having": [{"agg": "cnt", "op": ">", "value": 5}],
     }
-    case = _ok_case("g-alias", gold_payload, tags=("aggregate",))
+    case = _ok_case("g-alias", gold_payload)
     outcome = _outcome(status="ok", payload=actual_payload)
     row = score(case, outcome, root)
     assert row.exact_match is True
@@ -426,7 +434,7 @@ def test_joins_expected_and_actual_are_recorded_sorted(registry):
         "join": ["shipment"],
         "where": _and(_cond("shipment.amount", ">", 100)),
     }
-    case = _ok_case("g-join-1", gold_payload, tags=("join",))
+    case = _ok_case("g-join-1", gold_payload)
     outcome = _outcome(status="ok", payload=actual_payload)
     row = score(case, outcome, root)
 
@@ -438,7 +446,8 @@ def test_groups_recall_hit_true_when_field_shares_group_with_an_actual_field(reg
     root = registry.root("widget")
     # widget.status and widget.certified are both "Lifecycle" fields.
     gold_payload = {"root": "widget", "where": _and(_cond("widget.status", "=", "A"))}
-    actual_payload = {"root": "widget", "where": _and({"field": "widget.certified", "op": "is_true"})}
+    actual_payload = {"root": "widget", "where": _and(
+        {"field": "widget.certified", "op": "is_true"})}
     case = _ok_case("g-grp-1", gold_payload)
     outcome = _outcome(status="ok", payload=actual_payload)
     row = score(case, outcome, root)
@@ -459,7 +468,7 @@ def test_groups_recall_hit_none_when_gold_has_no_condition_fields(registry):
     root = registry.root("widget")
     gold_payload = {"root": "widget", "aggregate": [{"fn": "count", "field": "*", "as": "n"}]}
     actual_payload = {"root": "widget", "aggregate": [{"fn": "count", "field": "*", "as": "n"}]}
-    case = _ok_case("g-grp-3", gold_payload, tags=("aggregate",))
+    case = _ok_case("g-grp-3", gold_payload)
     outcome = _outcome(status="ok", payload=actual_payload)
     row = score(case, outcome, root)
     assert row.groups_recall_hit is None
@@ -475,8 +484,9 @@ def test_groups_recall_hit_covers_aggregate_only_gold_fields(registry):
         "aggregate": [{"fn": "sum", "field": "widget.price", "as": "total"}],
     }
     # widget.shipped shares widget.price's "Commercial" group.
-    actual_payload = {"root": "widget", "where": _and(_cond("widget.shipped", ">", "2024-01-01"))}
-    case = _ok_case("g-grp-4", gold_payload, tags=("aggregate",))
+    actual_payload = {"root": "widget", "where": _and(
+        _cond("widget.shipped", ">", "2024-01-01"))}
+    case = _ok_case("g-grp-4", gold_payload)
     outcome = _outcome(status="ok", payload=actual_payload)
     row = score(case, outcome, root)
     assert row.groups_recall_hit is True
@@ -619,3 +629,188 @@ def test_values_correct_catches_a_dropped_duplicate(registry):
     row = score(case, outcome, root)
     assert row.values_total == 1
     assert row.values_correct == 0
+
+
+# --------------------------------------------------------------------------
+# the echoed route: group-selection recall, measured rather than proxied
+# --------------------------------------------------------------------------
+
+
+def _route(root="widget", joins=(), groups=()):
+    return {"root": root, "joins": list(joins), "groups": list(groups)}
+
+
+def test_groups_recall_reads_the_echoed_route_when_there_is_one(registry):
+    """With an echo this is the real metric: did stage 1 select the group the
+    gold field lives in? The payload is beside the point -- here it names a
+    different field from the same group, which the proxy would have called a
+    hit for the wrong reason."""
+    root = registry.root("widget")
+    gold = {"root": "widget", "where": _and(_cond("widget.price", ">", 100))}
+    actual = {"root": "widget", "where": _and(_cond("widget.shipped", ">", "2024-01-01"))}
+    hit = score(
+        _ok_case("g-1", gold),
+        _outcome(status="ok", payload=actual, route=_route(groups=["Commercial"])),
+        root,
+    )
+    miss = score(
+        _ok_case("g-1", gold),
+        _outcome(status="ok", payload=actual, route=_route(groups=["Lifecycle"])),
+        root,
+    )
+    assert hit.groups_recall_hit is True
+    assert miss.groups_recall_hit is False
+
+
+def test_an_identity_group_is_not_required_of_the_route(registry):
+    """Identity groups are in scope whatever stage 1 picks, so a router that
+    does not name one has not missed anything."""
+    root = registry.root("widget")
+    gold = {"root": "widget", "where": _and(_cond("widget.region", "=", "N"))}
+    row = score(
+        _ok_case("g-2", gold),
+        _outcome(status="ok", payload=gold, route=_route(groups=["Lifecycle"])),
+        root,
+    )
+    assert row.groups_recall_hit is True
+
+
+def test_without_a_route_the_documented_proxy_still_runs(registry):
+    """No echo (an older deploy, or a response that never routed): the
+    lower-bound proxy from Task 3 is what remains, unchanged."""
+    root = registry.root("widget")
+    gold = {"root": "widget", "where": _and(_cond("widget.price", ">", 100))}
+    actual = {"root": "widget", "where": _and(_cond("widget.shipped", ">", "2024-01-01"))}
+    row = score(_ok_case("g-3", gold), _outcome(status="ok", payload=actual), root)
+    # Same group, different field: the proxy's optimistic hit.
+    assert row.groups_recall_hit is True
+
+
+def test_a_malformed_route_falls_back_to_the_proxy_without_raising(registry):
+    """A garbled echo is an unknown route, not an empty one. Scoring it as
+    "routed to nothing" would report a perfect service as missing every
+    group, so the proxy takes over.
+
+    (`Outcome.route` is typed `dict | None`, so a non-dict never gets this
+    far -- pydantic refuses it at construction. What is left to tolerate is
+    a dict whose `groups` is missing or the wrong shape.)"""
+    root = registry.root("widget")
+    gold = {"root": "widget", "where": _and(_cond("widget.price", ">", 100))}
+    for bad in ({}, {"groups": "Commercial"}, {"groups": None}, {"root": "widget"}):
+        row = score(
+            _ok_case("g-4", gold),
+            _outcome(status="ok", payload=gold, route=bad),
+            root,
+        )
+        assert row.groups_recall_hit is True, bad
+
+
+def test_a_route_carrying_no_groups_at_all_is_a_miss_not_a_fallback(registry):
+    """An empty list is a real answer -- stage 1 said it placed nothing --
+    and it is wrong whenever the gold answer needed a group."""
+    root = registry.root("widget")
+    gold = {"root": "widget", "where": _and(_cond("widget.price", ">", 100))}
+    row = score(
+        _ok_case("g-5", gold),
+        _outcome(status="ok", payload=gold, route=_route(groups=[])),
+        root,
+    )
+    assert row.groups_recall_hit is False
+
+
+# --------------------------------------------------------------------------
+# end_to_end_correct(): the frozen primary outcome
+# --------------------------------------------------------------------------
+
+
+def test_e2e_correct_for_an_ok_case_needs_status_ok_and_exact_match(registry):
+    root = registry.root("widget")
+    gold = {"root": "widget", "where": _and(_cond("widget.status", "=", "A"))}
+    right = score(_ok_case("g-6", gold), _outcome(status="ok", payload=gold), root)
+    assert right.exact_match is True
+    assert right.e2e_correct is True
+
+    other = {"root": "widget", "where": _and(_cond("widget.status", "=", "X"))}
+    wrong = score(_ok_case("g-6", gold), _outcome(status="ok", payload=other), root)
+    assert wrong.e2e_correct is False
+
+
+def test_an_ok_case_answered_with_a_clarification_is_incorrect(registry):
+    """The asymmetry the definition exists to pin: the caller was asked a
+    question instead of being given the answer, and the pruned payload
+    canonicalising equal to gold does not change that."""
+    root = registry.root("widget")
+    gold = {"root": "widget", "where": _and(_cond("widget.status", "=", "A"))}
+    row = score(
+        _ok_case("g-7", gold),
+        _outcome(status="clarify", payload=gold,
+                 candidates=({"field": "widget.status", "value": "A"},)),
+        root,
+    )
+    assert row.e2e_correct is False
+
+
+def test_e2e_correct_for_a_clarify_case_needs_the_right_field(registry):
+    root = registry.root("widget")
+    case = _clarify_case("g-8", "widget.status")
+    right = score(
+        case,
+        _outcome(status="clarify",
+                 candidates=({"field": "widget.status", "value": "A"},)),
+        root,
+    )
+    wrong_field = score(
+        case,
+        _outcome(status="clarify",
+                 candidates=({"field": "widget.region", "value": "N"},)),
+        root,
+    )
+    assert right.e2e_correct is True
+    assert wrong_field.e2e_correct is False
+
+
+def test_e2e_correct_for_a_refusal_case_needs_the_right_reason(registry):
+    root = registry.root("widget")
+    case = _refusal_case("g-9", "not_a_query")
+    right = score(case, _outcome(status="refusal", reason="not_a_query"), root)
+    wrong = score(
+        case, _outcome(status="refusal", reason="field_not_in_schema"), root
+    )
+    silent = score(case, _outcome(status="refusal"), root)
+    assert right.e2e_correct is True
+    assert wrong.e2e_correct is False
+    assert silent.e2e_correct is False
+
+
+def test_a_transport_failure_is_never_end_to_end_correct(registry):
+    root = registry.root("widget")
+    gold = {"root": "widget", "where": _and(_cond("widget.status", "=", "A"))}
+    row = score(_ok_case("g-10", gold), _outcome(error="timeout"), root)
+    assert row.e2e_correct is False
+
+
+def test_end_to_end_correct_is_one_function_every_branch_reads(registry):
+    """Called directly, with the diagnostics passed in: the row's primary
+    outcome and its diagnostics can never disagree about the same run."""
+    gold = {"root": "widget", "where": _and(_cond("widget.status", "=", "A"))}
+    ok_case = _ok_case("g-11", gold)
+    assert end_to_end_correct(
+        ok_case, _outcome(status="ok"), exact_match=True, candidate_hit=None
+    ) is True
+    assert end_to_end_correct(
+        ok_case, _outcome(status="ok"), exact_match=False, candidate_hit=None
+    ) is False
+    clarify = _clarify_case("g-12", "widget.status")
+    assert end_to_end_correct(
+        clarify, _outcome(status="clarify"), exact_match=None, candidate_hit=True
+    ) is True
+    assert end_to_end_correct(
+        clarify, _outcome(status="ok"), exact_match=None, candidate_hit=True
+    ) is False
+    refusal = _refusal_case("g-13", "not_a_query")
+    assert end_to_end_correct(
+        refusal,
+        _outcome(status="refusal", reason="not_a_query"),
+        exact_match=None,
+        candidate_hit=None,
+    ) is True

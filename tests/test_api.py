@@ -166,7 +166,13 @@ def test_a_registry_failure_does_not_echo_its_internals(registry):
 def test_healthz_reports_the_cached_registry_version(registry):
     response = _client(registry, []).get("/healthz")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "registry_version": "sha256:fixture-v1"}
+    assert response.json() == {
+        "status": "ok",
+        "registry_version": "sha256:fixture-v1",
+        "provider": "",
+        "model": "",
+        "router_model": "",
+    }
 
 
 def test_healthz_is_degraded_while_the_registry_is_out_of_reach(registry):
@@ -179,7 +185,13 @@ def test_healthz_is_degraded_while_the_registry_is_out_of_reach(registry):
     client = TestClient(create_app(stub, FakeProvider([])))
     response = client.get("/healthz")
     assert response.status_code == 503
-    assert response.json() == {"status": "degraded", "registry_version": None}
+    assert response.json() == {
+        "status": "degraded",
+        "registry_version": None,
+        "provider": "",
+        "model": "",
+        "router_model": "",
+    }
 
 
 def test_healthz_becomes_ready_on_its_own_once_the_registry_answers(registry):
@@ -196,7 +208,13 @@ def test_healthz_becomes_ready_on_its_own_once_the_registry_answers(registry):
     stub.error = None
     response = client.get("/healthz")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "registry_version": "sha256:fixture-v1"}
+    assert response.json() == {
+        "status": "ok",
+        "registry_version": "sha256:fixture-v1",
+        "provider": "",
+        "model": "",
+        "router_model": "",
+    }
 
 
 def test_healthz_does_not_refetch_once_the_registry_is_cached(registry):
@@ -513,3 +531,110 @@ def test_two_sequential_requests_do_not_leak_usage_into_each_other(registry):
     second_counts = {record["uncached_input_tokens"] for record in second["usage"]}
     assert first_counts == {1, 2}
     assert second_counts == {3, 4}
+
+
+# --------------------------------------------------------------------------
+# the stage-1 route echo, and the non-secret config on /healthz
+# --------------------------------------------------------------------------
+
+
+def test_the_route_is_echoed_on_an_ok_response(registry):
+    """The stage-1 decision, beside the answer it produced.
+
+    This is what turns group-selection recall from a lower-bound proxy into
+    a measurement: the harness compares the groups the gold answer needed
+    against the groups stage 1 actually chose, rather than guessing from the
+    payload which groups must have been in scope.
+    """
+    response = _client(registry, [ROUTE, GOOD]).post(
+        "/translate", json={"question": "active widgets", "now_year": 2026}
+    )
+    assert response.json()["route"] == {
+        "root": "widget", "joins": [], "groups": ["Lifecycle"]
+    }
+
+
+def test_the_route_is_echoed_on_a_clarification(registry):
+    # Two conditions, one unresolvable: pruning the bad one has to leave the
+    # caller's builder something, or the service refuses instead of asking.
+    unresolvable = {"root": "widget", "where": {"combinator": "AND", "children": [
+        {"field": "widget.year", "op": "=", "value": 2024},
+        {"field": "widget.status", "op": "=", "value": "sideways"}]}}
+    response = _client(registry, [ROUTE, unresolvable]).post(
+        "/translate", json={"question": "sideways widgets", "now_year": 2026}
+    )
+    body = response.json()
+    assert body["status"] == "needs_clarification"
+    assert body["route"]["root"] == "widget"
+
+
+def test_the_route_is_echoed_on_a_refusal_that_got_as_far_as_routing(registry):
+    """A refusal from stage 2 still routed, and the route is the diagnosis:
+    a refusal that followed a wrong group selection is a routing failure
+    wearing a translation failure's label."""
+    unusable = {"root": "widget", "where": {"combinator": "AND", "children": [
+        {"field": "widget.nope", "op": "=", "value": "A"}]}}
+    response = _client(registry, [ROUTE, unusable, unusable]).post(
+        "/translate", json={"question": "widgets that nope", "now_year": 2026}
+    )
+    body = response.json()
+    assert body["status"] == "refused"
+    assert body["route"] == {"root": "widget", "joins": [], "groups": ["Lifecycle"]}
+
+
+def test_the_route_is_null_when_the_request_never_routed(registry):
+    """Best-effort by design: a routing failure refuses before there is a
+    route to report, and `null` says so rather than inventing one."""
+    response = _client(registry, [{"root": "nope", "joins": [], "groups": []}]).post(
+        "/translate", json={"question": "what is the weather"}
+    )
+    body = response.json()
+    assert body["status"] == "refused"
+    assert body["route"] is None
+
+
+def test_the_echoed_route_carries_the_joins_stage_one_chose(registry):
+    routed = {"root": "widget", "joins": ["shipment"], "groups": ["Commercial"]}
+    payload = {"root": "widget", "where": {"combinator": "AND", "children": [
+        {"field": "shipment.amount", "op": ">", "value": 100}]},
+        "join": ["shipment"]}
+    response = _client(registry, [routed, payload]).post(
+        "/translate", json={"question": "widgets over 100", "now_year": 2026}
+    )
+    assert response.json()["route"]["joins"] == ["shipment"]
+
+
+def test_healthz_reports_the_model_configuration_and_nothing_else(registry):
+    """A run must be able to record which models answered it rather than
+    trusting whoever started it to remember. Names only: the body is a
+    literal three-key dict, so a setting added later — a key, a token —
+    cannot appear on this unauthenticated endpoint by default."""
+    app = create_app(
+        StubRegistry(registry),
+        FakeProvider([]),
+        provider_name="openai",
+        model="gpt-5",
+        router_model="gpt-5-mini",
+    )
+    body = TestClient(app).get("/healthz").json()
+    assert body["provider"] == "openai"
+    assert body["model"] == "gpt-5"
+    assert body["router_model"] == "gpt-5-mini"
+    assert set(body) == {
+        "status", "registry_version", "provider", "model", "router_model"
+    }
+
+
+def test_healthz_never_reports_a_secret(registry):
+    """The one thing this endpoint must never do. Asserted by content, not
+    by key name: a future key leaking under an innocent name would pass a
+    name-only check."""
+    app = create_app(
+        StubRegistry(registry),
+        FakeProvider([]),
+        service_token=TOKEN,
+        provider_name="openai",
+        model="gpt-5",
+    )
+    body = TestClient(app).get("/healthz").text
+    assert TOKEN not in body

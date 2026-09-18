@@ -225,7 +225,8 @@ def test_a_cold_real_client_reports_unready_then_warms_itself(registry_json):
     probe = http.get("/healthz")
 
     assert probe.status_code == 200
-    assert probe.json() == {"status": "ok", "registry_version": "sha256:fixture-v1"}
+    assert probe.json()["status"] == "ok"
+    assert probe.json()["registry_version"] == "sha256:fixture-v1"
     assert len(calls) == 1
     assert client.cached is not None
 

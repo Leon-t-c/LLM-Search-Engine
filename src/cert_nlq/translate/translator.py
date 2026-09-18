@@ -1,4 +1,5 @@
 """Stage 2 plus orchestration: question in, one of three responses out."""
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 from pydantic import ValidationError
@@ -73,7 +74,18 @@ def translate(
     registry: Registry,
     provider: Provider,
     now_year: int | None = None,
+    on_route: Callable[[Route], None] | None = None,
 ) -> TranslateResponse:
+    """Question in, one of three responses out.
+
+    `on_route` is handed the stage-1 decision the moment it is made, for a
+    caller that needs to *see* the route as well as the answer -- the API
+    echoes it so an eval run can score group selection directly instead of
+    inferring it from the payload. An optional callback rather than a
+    changed return type: every other caller keeps the signature it has, and
+    a route is not always reached (a routing failure refuses before there
+    is one), so a caller must be able to observe "no route" too.
+    """
     try:
         chosen = route(question, registry, provider)
     except RoutingError:
@@ -81,6 +93,8 @@ def translate(
             reason=RefusalReason.NOT_A_QUERY,
             detail="This does not resolve to a question about the data.",
         )
+    if on_route is not None:
+        on_route(chosen)
 
     root = registry.root(chosen.root)
     payload, problem = _translate_stage_two(question, registry, root, chosen, provider)

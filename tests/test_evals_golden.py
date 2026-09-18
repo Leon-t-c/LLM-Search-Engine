@@ -11,10 +11,15 @@ import pytest
 from pydantic import ValidationError
 
 from cert_nlq.evals.golden import (
+    SLICES,
     ExpectClarify,
     ExpectOk,
     ExpectRefusal,
+    GoldenCase,
     GoldenError,
+    derive_difficulty,
+    derive_slices,
+    family,
     load_golden,
 )
 
@@ -31,7 +36,8 @@ def _case(case_id="g-001", **overrides):
     case = {
         "id": case_id,
         "question": "active widgets",
-        "tags": ["selection"],
+        "tags": [],
+        "source": "hand-written",
         "expect": {"kind": "ok", "payload": OK_PAYLOAD},
     }
     case.update(overrides)
@@ -50,7 +56,7 @@ def test_a_valid_ok_case_loads(tmp_path, registry):
     cases = load_golden(_write(tmp_path, _case()), registry)
     assert [c.id for c in cases] == ["g-001"]
     assert isinstance(cases[0].expect, ExpectOk)
-    assert cases[0].tags == ("selection",)
+    assert cases[0].tags == ()
     assert cases[0].expect.payload["root"] == "widget"
 
 
@@ -70,10 +76,8 @@ def test_clarify_and_refusal_cases_load(tmp_path, registry):
     cases = load_golden(
         _write(
             tmp_path,
-            _case("g-001", tags=["clarify"],
-                  expect={"kind": "clarify", "field": "widget.status"}),
-            _case("g-002", tags=["refusal:not_a_query"],
-                  expect={"kind": "refusal", "reason": "not_a_query"}),
+            _case("g-001", expect={"kind": "clarify", "field": "widget.status"}),
+            _case("g-002", expect={"kind": "refusal", "reason": "not_a_query"}),
         ),
         registry,
     )
@@ -134,8 +138,7 @@ def test_an_unknown_refusal_reason_is_rejected(tmp_path, registry):
         load_golden(
             _write(
                 tmp_path,
-                _case("g-050", tags=["refusal:too_hard"],
-                      expect={"kind": "refusal", "reason": "too_hard"}),
+                _case("g-050", expect={"kind": "refusal", "reason": "too_hard"}),
             ),
             registry,
         )
@@ -148,26 +151,32 @@ def test_an_unknown_clarification_field_is_rejected(tmp_path, registry):
         load_golden(
             _write(
                 tmp_path,
-                _case("g-051", tags=["clarify"],
-                      expect={"kind": "clarify", "field": "widget.nope"}),
+                _case("g-051", expect={"kind": "clarify", "field": "widget.nope"}),
             ),
             registry,
         )
     assert "g-051" in str(exc.value)
 
 
-def test_a_case_needs_exactly_one_slice_tag(tmp_path, registry):
+def test_the_aux_tags_load_and_a_retired_slice_tag_does_not(tmp_path, registry):
+    """`tags` is a closed set of hand tags now; slices are derived.
+
+    The retired names are rejected rather than ignored, so a file half-way
+    through the migration fails loudly instead of quietly losing the tagging
+    it thought it had.
+    """
+    cases = load_golden(
+        _write(tmp_path, _case("g-060", tags=["review", "regression"])), registry
+    )
+    assert cases[0].tags == ("review", "regression")
     with pytest.raises(GoldenError) as exc:
         load_golden(
-            _write(
-                tmp_path,
-                _case("g-060", tags=["regression"]),
-                _case("g-061", tags=["selection", "aggregate"]),
-            ),
+            _write(tmp_path, _case("g-061", tags=["selection", "aggregate"])),
             registry,
         )
-    assert "g-060" in str(exc.value)
-    assert "g-061" in str(exc.value)
+    message = str(exc.value)
+    assert "g-061" in message
+    assert "aggregate" in message and "selection" in message
 
 
 def test_every_problem_is_reported_not_just_the_first(tmp_path, registry):
@@ -185,10 +194,8 @@ def test_every_problem_is_reported_not_just_the_first(tmp_path, registry):
             _write(
                 tmp_path,
                 _case("g-001", expect={"kind": "ok", "payload": bad_field}),
-                _case("g-002", tags=["refusal:not_a_query"],
-                      expect={"kind": "refusal", "reason": "nope"}),
-                _case("g-003", tags=["clarify"],
-                      expect={"kind": "clarify", "field": "widget.nope"}),
+                _case("g-002", expect={"kind": "refusal", "reason": "nope"}),
+                _case("g-003", expect={"kind": "clarify", "field": "widget.nope"}),
                 _case("g-004"),
                 _case("g-004"),
             ),
@@ -197,10 +204,11 @@ def test_every_problem_is_reported_not_just_the_first(tmp_path, registry):
     message = str(exc.value)
     for case_id in ("g-001", "g-002", "g-003", "g-004"):
         assert case_id in message
-    # Five, not four: g-002's invented reason is wrong twice over -- the reason
-    # itself is not in the closed set, and the slice tag it was filed under
-    # claims a different one. Two defects, two sentences.
-    assert len(exc.value.problems) == 5
+    # Four: one bad field, one invented refusal reason, one unknown
+    # clarification field, one duplicate id. (It was five while a slice tag
+    # could disagree with the expectation it was filed under; that check is
+    # gone with the tags themselves.)
+    assert len(exc.value.problems) == 4
 
 
 def test_a_malformed_line_is_reported_with_its_line_number(tmp_path, registry):
@@ -215,7 +223,8 @@ def test_a_malformed_line_is_reported_with_its_line_number(tmp_path, registry):
 def test_a_case_missing_its_expectation_is_reported_by_id(tmp_path, registry):
     path = tmp_path / "golden.jsonl"
     path.write_text(
-        json.dumps({"id": "g-070", "question": "hi", "tags": ["selection"]}) + "\n",
+        json.dumps({"id": "g-070", "question": "hi", "source": "hand-written"})
+        + "\n",
         encoding="utf-8",
     )
     with pytest.raises(GoldenError, match="g-070"):
@@ -271,8 +280,7 @@ def test_a_clarification_field_with_no_vocabulary_is_rejected(tmp_path, registry
         load_golden(
             _write(
                 tmp_path,
-                _case("g-082", tags=["clarify"],
-                      expect={"kind": "clarify", "field": "widget.serial"}),
+                _case("g-082", expect={"kind": "clarify", "field": "widget.serial"}),
             ),
             registry,
         )
@@ -287,8 +295,7 @@ def test_the_unknown_clarification_field_message_says_what_is_wrong(tmp_path, re
         load_golden(
             _write(
                 tmp_path,
-                _case("g-083", tags=["clarify"],
-                      expect={"kind": "clarify", "field": "widget.nope"}),
+                _case("g-083", expect={"kind": "clarify", "field": "widget.nope"}),
             ),
             registry,
         )
@@ -323,36 +330,28 @@ def test_a_duplicate_id_still_reports_that_cases_other_defects(tmp_path, registr
     assert "unknown field" in message
 
 
-def test_a_slice_tag_must_agree_with_the_expectation_kind(tmp_path, registry):
-    with pytest.raises(GoldenError) as exc:
-        load_golden(
-            _write(
-                tmp_path,
-                _case("g-085", tags=["aggregate"],
-                      expect={"kind": "refusal", "reason": "not_a_query"}),
-                _case("g-086", tags=["clarify"]),
-            ),
-            registry,
-        )
-    message = str(exc.value)
-    assert "g-085" in message and "'aggregate'" in message and "'refusal'" in message
-    assert "g-086" in message and "'clarify'" in message and "'ok'" in message
+def test_a_case_must_say_where_it_came_from(tmp_path, registry):
+    """`source` is required, with no default.
 
-
-def test_a_refusal_tag_must_name_the_expected_reason(tmp_path, registry):
+    Provenance is what nobody remembers six weeks later, and the primary
+    analysis turns on it: it excludes paraphrases, which it can only do if
+    every case says what it is.
+    """
+    path = tmp_path / "golden.jsonl"
+    path.write_text(
+        json.dumps({
+            "id": "g-087",
+            "question": "active widgets",
+            "tags": [],
+            "expect": {"kind": "ok", "payload": OK_PAYLOAD},
+        }) + "\n",
+        encoding="utf-8",
+    )
     with pytest.raises(GoldenError) as exc:
-        load_golden(
-            _write(
-                tmp_path,
-                _case("g-087", tags=["refusal:not_a_query"],
-                      expect={"kind": "refusal", "reason": "field_not_in_schema"}),
-            ),
-            registry,
-        )
+        load_golden(path, registry)
     message = str(exc.value)
     assert "g-087" in message
-    assert "refusal:not_a_query" in message
-    assert "field_not_in_schema" in message
+    assert "source" in message
 
 
 def test_a_stray_key_in_a_gold_payload_is_rejected(tmp_path, registry):
@@ -363,7 +362,7 @@ def test_a_stray_key_in_a_gold_payload_is_rejected(tmp_path, registry):
         load_golden(
             _write(
                 tmp_path,
-                _case("g-088", tags=["aggregate"], expect={"kind": "ok", "payload": {
+                _case("g-088", expect={"kind": "ok", "payload": {
                     **OK_PAYLOAD, "groupby": ["widget.region"]}}),
             ),
             registry,
@@ -389,3 +388,355 @@ def test_one_case_with_two_defects_reports_both(tmp_path, registry):
         )
     assert len(exc.value.problems) == 2
     assert all(p.startswith("g-089: ") for p in exc.value.problems)
+
+
+# --------------------------------------------------------------------------
+# derived slices and difficulty
+# --------------------------------------------------------------------------
+
+
+def _built(**overrides) -> GoldenCase:
+    """A `GoldenCase` built directly, skipping the file and the registry
+    cross-checks -- these tests are about the derivations, not the loader."""
+    return GoldenCase.model_validate(_case(**overrides))
+
+
+def _ok(payload, **overrides) -> GoldenCase:
+    return _built(expect={"kind": "ok", "payload": payload}, **overrides)
+
+
+def _cond(field, op, value=None):
+    node = {"field": field, "op": op}
+    if value is not None:
+        node["value"] = value
+    return node
+
+
+def _where(*children):
+    return {"combinator": "AND", "children": list(children)}
+
+
+def test_a_lone_condition_is_a_simple_filter(registry):
+    case = _ok({"root": "widget", "where": _where(_cond("widget.serial", "=", 7))})
+    assert derive_slices(case, registry) == {"simple-filter"}
+    assert derive_difficulty(case, registry) == "easy"
+
+
+def test_two_conditions_are_multi_condition_not_simple(registry):
+    case = _ok({
+        "root": "widget",
+        "where": _where(
+            _cond("widget.serial", "=", 7), _cond("widget.year", "=", 2024)
+        ),
+    })
+    assert derive_slices(case, registry) == {"multi-condition"}
+    assert derive_difficulty(case, registry) == "medium"
+
+
+def test_a_lone_condition_under_a_group_by_is_not_a_simple_filter(registry):
+    """One condition "and nothing else" means nothing else. A breakdown
+    question wearing a single filter is not the easy slice."""
+    case = _ok({
+        "root": "widget",
+        "where": _where(_cond("widget.year", "=", 2024)),
+        "aggregate": [{"fn": "count", "field": "*", "as": "total"}],
+        "group_by": ["widget.region"],
+    })
+    slices = derive_slices(case, registry)
+    assert "simple-filter" not in slices
+    assert slices == {"aggregation", "group-by"}
+
+
+def test_nested_logic_is_derived_from_where_depth_and_is_hard(registry):
+    case = _ok({
+        "root": "widget",
+        "where": _where(
+            _cond("widget.year", "=", 2024),
+            {"combinator": "OR", "children": [
+                _cond("widget.certified", "is_true"),
+                _cond("widget.status", "=", "A"),
+            ]},
+        ),
+    })
+    slices = derive_slices(case, registry)
+    assert "nested-logic" in slices
+    assert "multi-condition" in slices
+    assert derive_difficulty(case, registry) == "hard"
+
+
+def test_a_flat_group_is_not_nested_logic(registry):
+    case = _ok({
+        "root": "widget",
+        "where": _where(
+            _cond("widget.year", "=", 2024), _cond("widget.status", "=", "A")
+        ),
+    })
+    assert "nested-logic" not in derive_slices(case, registry)
+
+
+def test_in_op_and_coded_vocabulary_are_derived_from_the_conditions(registry):
+    case = _ok({
+        "root": "widget",
+        "where": _where(_cond("widget.status", "in", ["A", "X"])),
+    })
+    assert derive_slices(case, registry) == {
+        "simple-filter", "in-op", "coded-vocabulary"
+    }
+
+
+def test_a_vocabulary_less_field_is_not_coded_vocabulary(registry):
+    case = _ok({"root": "widget", "where": _where(_cond("widget.price", ">", 10))})
+    assert "coded-vocabulary" not in derive_slices(case, registry)
+
+
+def test_one_condition_plus_a_join_is_a_join_case_and_only_medium(registry):
+    """The rubric's own edge: easy needs no join, and one join is not two."""
+    case = _ok({
+        "root": "widget",
+        "where": _where(_cond("shipment.amount", ">", 100)),
+        "join": ["shipment"],
+    })
+    assert "join" in derive_slices(case, registry)
+    assert "simple-filter" not in derive_slices(case, registry)
+    assert derive_difficulty(case, registry) == "medium"
+
+
+def test_a_join_is_derived_from_the_fields_even_when_the_slot_is_empty(registry):
+    case = _ok({
+        "root": "widget",
+        "where": _where(_cond("shipment.amount", ">", 100)),
+    })
+    assert "join" in derive_slices(case, registry)
+
+
+def test_aggregation_group_by_and_having_are_each_their_own_slice(registry):
+    case = _ok({
+        "root": "widget",
+        "where": _where(_cond("widget.year", "=", 2024)),
+        "aggregate": [{"fn": "count", "field": "*", "as": "total"}],
+        "group_by": ["widget.region"],
+        "having": [{"agg": "total", "op": ">", "value": 10}],
+    })
+    assert derive_slices(case, registry) >= {"aggregation", "group-by", "having"}
+
+
+def test_a_mixed_grain_aggregate_is_hard(registry):
+    """Aggregating a joined table's field per a root field: two row-grains in
+    one answer, and the join fans out."""
+    case = _ok({
+        "root": "widget",
+        "where": _where(_cond("widget.year", "=", 2024)),
+        "join": ["shipment"],
+        "aggregate": [{"fn": "avg", "field": "shipment.amount", "as": "average"}],
+        "group_by": ["widget.region"],
+    })
+    assert derive_difficulty(case, registry) == "hard"
+
+
+def test_a_single_grain_aggregate_is_medium(registry):
+    case = _ok({
+        "root": "widget",
+        "where": _where(_cond("widget.year", "=", 2024)),
+        "aggregate": [{"fn": "avg", "field": "widget.price", "as": "average"}],
+        "group_by": ["widget.region"],
+    })
+    assert derive_difficulty(case, registry) == "medium"
+
+
+def test_ambiguous_wording_makes_a_case_hard_whatever_its_shape(registry):
+    case = _ok(
+        {"root": "widget", "where": _where(_cond("widget.serial", "=", 7))},
+        tags=["ambiguous-wording"],
+    )
+    assert derive_difficulty(case, registry) == "hard"
+
+
+def test_clarify_and_refusal_slices_carry_no_structural_slice(registry):
+    clarify = _built(expect={"kind": "clarify", "field": "widget.status"})
+    refusal = _built(expect={"kind": "refusal", "reason": "not_a_query"})
+    assert derive_slices(clarify, registry) == {"clarification"}
+    assert derive_slices(refusal, registry) == {"refusal"}
+    assert derive_difficulty(clarify, registry) == "medium"
+    assert derive_difficulty(refusal, registry) == "medium"
+
+
+def test_every_derived_slice_name_is_declared(registry):
+    case = _ok({
+        "root": "widget",
+        "where": _where(
+            _cond("widget.status", "in", ["A", "X"]),
+            {"combinator": "OR", "children": [
+                _cond("shipment.amount", ">", 100),
+                _cond("widget.price", ">", 10),
+            ]},
+        ),
+        "join": ["shipment"],
+        "aggregate": [{"fn": "count", "field": "*", "as": "total"}],
+        "group_by": ["widget.region"],
+        "having": [{"agg": "total", "op": ">", "value": 1}],
+    })
+    assert derive_slices(case, registry) <= SLICES
+
+
+def test_difficulty_override_wins_and_needs_a_note(registry):
+    overridden = _ok(
+        {"root": "widget", "where": _where(_cond("widget.serial", "=", 7))},
+        difficulty_override="hard",
+        note="the serial format is the whole difficulty here",
+    )
+    assert derive_difficulty(overridden, registry) == "hard"
+    with pytest.raises(ValidationError, match="note"):
+        _ok(
+            {"root": "widget", "where": _where(_cond("widget.serial", "=", 7))},
+            difficulty_override="hard",
+        )
+
+
+# --------------------------------------------------------------------------
+# gold_root, paraphrase_of, and the literal-preservation guard
+# --------------------------------------------------------------------------
+
+
+def test_gold_root_is_rejected_on_an_ok_case_that_disagrees(tmp_path, registry):
+    with pytest.raises(GoldenError) as exc:
+        load_golden(
+            _write(tmp_path, _case("g-090", gold_root="vendor")), registry
+        )
+    message = str(exc.value)
+    assert "g-090" in message
+    assert "gold_root" in message
+
+
+def test_gold_root_may_restate_an_ok_payloads_own_root(tmp_path, registry):
+    cases = load_golden(
+        _write(tmp_path, _case("g-091", gold_root="widget")), registry
+    )
+    assert cases[0].gold_root == "widget"
+
+
+def test_gold_root_records_the_route_a_clarify_case_expects(tmp_path, registry):
+    cases = load_golden(
+        _write(
+            tmp_path,
+            _case("g-092", gold_root="widget",
+                  expect={"kind": "clarify", "field": "widget.status"}),
+        ),
+        registry,
+    )
+    assert cases[0].gold_root == "widget"
+
+
+def test_an_unknown_gold_root_is_rejected(tmp_path, registry):
+    with pytest.raises(GoldenError) as exc:
+        load_golden(
+            _write(
+                tmp_path,
+                _case("g-093", gold_root="sprocket",
+                      expect={"kind": "refusal", "reason": "not_a_query"}),
+            ),
+            registry,
+        )
+    assert "g-093" in str(exc.value)
+    assert "unknown gold_root" in str(exc.value)
+
+
+def _paraphrase(case_id, of, question, **overrides):
+    return _case(
+        case_id,
+        question=question,
+        tags=["review"],
+        source="paraphrase",
+        paraphrase_of=of,
+        **overrides,
+    )
+
+
+def test_a_paraphrase_loads_and_reports_its_family(tmp_path, registry):
+    cases = load_golden(
+        _write(
+            tmp_path,
+            _case("g-100", question="widgets active in 2024 over $500"),
+            _paraphrase("g-100-p1", "g-100", "active 2024 widgets above $500"),
+        ),
+        registry,
+    )
+    assert [family(c) for c in cases] == ["g-100", "g-100"]
+
+
+def test_paraphrase_of_must_name_a_case_in_the_file(tmp_path, registry):
+    with pytest.raises(GoldenError) as exc:
+        load_golden(
+            _write(tmp_path, _paraphrase("g-101-p1", "g-999", "active widgets")),
+            registry,
+        )
+    assert "g-101-p1" in str(exc.value)
+    assert "g-999" in str(exc.value)
+
+
+def test_a_paraphrase_of_a_paraphrase_is_rejected(tmp_path, registry):
+    """One level only: a chain makes the family depend on which link you
+    walked, and the cluster bootstrap resamples families."""
+    with pytest.raises(GoldenError) as exc:
+        load_golden(
+            _write(
+                tmp_path,
+                _case("g-102", question="active widgets in 2024"),
+                _paraphrase("g-102-p1", "g-102", "2024 widgets, active"),
+                _paraphrase("g-102-p2", "g-102-p1", "active widgets, 2024"),
+            ),
+            registry,
+        )
+    message = str(exc.value)
+    assert "g-102-p2" in message
+    assert "itself a paraphrase" in message
+
+
+def test_a_paraphrase_that_drops_a_number_is_rejected(tmp_path, registry):
+    """The classic boundary drift: the rewording reads fine and asks a
+    different question."""
+    with pytest.raises(GoldenError) as exc:
+        load_golden(
+            _write(
+                tmp_path,
+                _case("g-103", question="widgets shipped after 2024"),
+                _paraphrase("g-103-p1", "g-103", "widgets shipped last year"),
+            ),
+            registry,
+        )
+    message = str(exc.value)
+    assert "g-103-p1" in message
+    assert "2024" in message
+
+
+def test_a_paraphrase_that_drops_a_quoted_code_is_rejected(tmp_path, registry):
+    with pytest.raises(GoldenError) as exc:
+        load_golden(
+            _write(
+                tmp_path,
+                _case("g-104", question="widgets for client C-102"),
+                _paraphrase("g-104-p1", "g-104", "that client's widgets"),
+            ),
+            registry,
+        )
+    assert "g-104-p1" in str(exc.value)
+
+
+def test_a_rewording_that_keeps_every_literal_is_fine(tmp_path, registry):
+    cases = load_golden(
+        _write(
+            tmp_path,
+            _case("g-105", question="widgets for client C-102 shipped after 2024"),
+            _paraphrase(
+                "g-105-p1", "g-105", "widgets shipped after 2024 for C-102"
+            ),
+        ),
+        registry,
+    )
+    assert len(cases) == 2
+
+
+def test_source_paraphrase_and_paraphrase_of_must_go_together(tmp_path, registry):
+    with pytest.raises(ValidationError, match="paraphrase"):
+        GoldenCase.model_validate(_case("g-106", source="paraphrase"))
+    with pytest.raises(ValidationError, match="paraphrase"):
+        GoldenCase.model_validate(_case("g-107", paraphrase_of="g-106"))
