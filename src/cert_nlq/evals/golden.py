@@ -25,6 +25,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from ..ir.payload import Payload
 from ..ir.validate import PayloadError, validate_payload
 from ..registry.models import Registry
 from ..translate.refusals import RefusalReason
@@ -37,6 +38,33 @@ SLICE_TAGS = frozenset(
     {"selection", "values", "aggregate", "join", "clarify"}
     | {f"refusal:{reason.value}" for reason in RefusalReason}
 )
+
+#: Which slice tag goes with which expectation. A case tagged `aggregate` that
+#: expects a refusal is one of the two halves being wrong, and which half does
+#: not matter -- either way the slice it is counted in is not the thing it
+#: measures.
+_KIND_FOR_TAG = dict.fromkeys(("selection", "values", "aggregate", "join"), "ok")
+_KIND_FOR_TAG["clarify"] = "clarify"
+_KIND_FOR_TAG.update(
+    {f"refusal:{reason.value}": "refusal" for reason in RefusalReason}
+)
+
+#: The slots a payload actually has. `Payload` ignores anything else -- the
+#: service must stay tolerant on its wire, where an unexpected key is the host's
+#: business and not a reason to fail a request. A *gold* payload is the
+#: opposite: it is hand-written, nothing downstream reads a stray key, and a
+#: typo'd `"groupby"` would validate perfectly and then never match anything,
+#: reporting a translation failure that is really a typo in the ruler.
+_PAYLOAD_KEYS = frozenset(Payload.model_fields)
+
+
+#: Every model here forbids extra keys. The golden file is the foundation the
+#: measurement stands on, and the failure mode it has to rule out is silence:
+#: a mistyped `"notes"` on one of the three cases whose note exists to defend a
+#: counter-intuitive expectation would simply vanish, and a `"field"` left
+#: behind on a case edited from `clarify` to `ok` would look like it still said
+#: something. A key nobody reads is a key nobody notices is missing.
+_STRICT = ConfigDict(frozen=True, extra="forbid")
 
 
 class ExpectOk(BaseModel):
@@ -51,7 +79,7 @@ class ExpectOk(BaseModel):
     reported by case id.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = _STRICT
 
     kind: Literal["ok"] = "ok"
     payload: dict
@@ -66,14 +94,14 @@ class ExpectClarify(BaseModel):
     numerator of candidate recall, and the part a translation can get wrong.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = _STRICT
 
     kind: Literal["clarify"] = "clarify"
     field: str
 
 
 class ExpectRefusal(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = _STRICT
 
     kind: Literal["refusal"] = "refusal"
     reason: str
@@ -85,7 +113,7 @@ Expectation = Annotated[
 
 
 class GoldenCase(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = _STRICT
 
     id: str
     question: str
@@ -142,11 +170,15 @@ def load_golden(path: str | Path, registry: Registry) -> list[GoldenCase]:
             problems.append(f"{label}: {_summarise(exc)}")
             continue
         if case.id in first_seen:
+            # Reported, then checked anyway. A duplicate id is a problem with
+            # the *file*; whatever else is wrong with this case is a problem
+            # with the case, and swallowing the second so the reader can see
+            # the first costs them another whole run to find it.
             problems.append(
                 f"{case.id}: duplicate id (first seen on line {first_seen[case.id]})"
             )
-            continue
-        first_seen[case.id] = lineno
+        else:
+            first_seen[case.id] = lineno
         problems += _check_tags(case)
         problems += _check_expectation(case, registry)
         cases.append(case)
@@ -165,11 +197,24 @@ def _summarise(exc: ValidationError) -> str:
 
 def _check_tags(case: GoldenCase) -> list[str]:
     slices = sorted(set(case.tags) & SLICE_TAGS)
-    if len(slices) == 1:
-        return []
     if not slices:
         return [f"{case.id}: no slice tag (one of {', '.join(sorted(SLICE_TAGS))})"]
-    return [f"{case.id}: more than one slice tag {slices}"]
+    if len(slices) > 1:
+        return [f"{case.id}: more than one slice tag {slices}"]
+
+    tag = slices[0]
+    kind = case.expect.kind
+    if _KIND_FOR_TAG[tag] != kind:
+        return [
+            f"{case.id}: slice tag {tag!r} expects a {_KIND_FOR_TAG[tag]!r} "
+            f"case, but this one is {kind!r}"
+        ]
+    if tag.startswith("refusal:") and tag.removeprefix("refusal:") != case.expect.reason:
+        return [
+            f"{case.id}: slice tag {tag!r} disagrees with refusal reason "
+            f"{case.expect.reason!r}"
+        ]
+    return []
 
 
 def _check_expectation(case: GoldenCase, registry: Registry) -> list[str]:
@@ -181,15 +226,33 @@ def _check_expectation(case: GoldenCase, registry: Registry) -> list[str]:
     if isinstance(expect, ExpectClarify):
         # Any root: a clarification names a field, and which root the question
         # routes to is the service's decision, not the gold case's.
-        if not any(
-            expect.field in root.fields_by_key for root in registry.roots
-        ):
+        specs = [
+            root.fields_by_key[expect.field]
+            for root in registry.roots
+            if expect.field in root.fields_by_key
+        ]
+        if not specs:
             return [f"{case.id}: unknown clarification field {expect.field!r}"]
+        # Existing is not enough. `needs_clarification` is only reachable
+        # through a field with a closed vocabulary -- a value that will not
+        # resolve on a field with nothing to offer back is *refused*, by
+        # design. So a gold clarify case naming a vocabulary-less field asserts
+        # an outcome the service cannot produce, and candidate recall, whose
+        # numerator these cases are, would be measuring a constant.
+        if not any(spec.vocabulary for spec in specs):
+            return [
+                f"{case.id}: clarification field {expect.field!r} has no "
+                f"vocabulary, so it can never produce candidates"
+            ]
         return []
+    strays = sorted(set(expect.payload) - _PAYLOAD_KEYS)
+    problems = [
+        f"{case.id}: gold payload has no slot {key!r}" for key in strays
+    ]
     try:
         validate_payload(expect.payload, registry)
     except PayloadError as exc:
-        return [f"{case.id}: {problem}" for problem in exc.problems]
+        problems += [f"{case.id}: {problem}" for problem in exc.problems]
     except ValidationError as exc:
-        return [f"{case.id}: {_summarise(exc)}"]
-    return []
+        problems.append(f"{case.id}: {_summarise(exc)}")
+    return problems
