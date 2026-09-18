@@ -3,6 +3,7 @@
 Dependencies are passed to create_app explicitly rather than imported, so
 tests construct an app that cannot reach the network.
 """
+import contextvars
 import logging
 import secrets
 
@@ -23,6 +24,17 @@ logger = logging.getLogger(__name__)
 #: miserable to reconstruct after the fact. Both adapters feed it, and both
 #: emit the same keys, so one line prices either of them.
 usage_log = logging.getLogger("cert_nlq.usage")
+
+#: Per-request usage capture. `None` outside a request; a fresh list for the
+#: duration of one `/translate` call, so `_log_usage` has somewhere to put a
+#: copy of every record for the response that is scoring it, on top of the
+#: log line it always writes.
+#:
+#: A ContextVar, not a global list: uvicorn's threadpool interleaves
+#: requests, and one request's tokens must never land in another's bill.
+_request_usage: contextvars.ContextVar[list | None] = contextvars.ContextVar(
+    "_request_usage", default=None
+)
 
 
 class TranslateRequest(BaseModel):
@@ -121,40 +133,66 @@ def create_app(
                 status_code=503,
                 detail="The query service is temporarily unavailable.",
             ) from exc
+        # Fresh per request, and torn down in `finally` even on an exception
+        # path below: leaving a stale list set would let the next request
+        # sharing this thread capture into it, or capture into nothing.
+        usage: list = []
+        token = _request_usage.set(usage)
         try:
-            response = translate(
-                request.question, registry, provider, now_year=request.now_year
-            )
-        except ProviderError as exc:
-            logger.exception("translation provider failed")
-            raise HTTPException(
-                status_code=502,
-                detail="The translation provider is temporarily unavailable.",
-            ) from exc
-        except ScopeError as exc:
-            # A root that offers no fields to translate against is a
-            # registry problem, not a bug in this service — tell the two
-            # apart rather than letting this surface as an undifferentiated
-            # 500. Deliberately not a blanket `except Exception`: a real bug
-            # here should still 500 rather than claim to be retryable.
-            logger.exception("registry-shaped scope failure")
-            raise HTTPException(
-                status_code=503,
-                detail="The query service is temporarily unavailable.",
-            ) from exc
+            try:
+                response = translate(
+                    request.question, registry, provider, now_year=request.now_year
+                )
+            except ProviderError as exc:
+                logger.exception("translation provider failed")
+                raise HTTPException(
+                    status_code=502,
+                    detail="The translation provider is temporarily unavailable.",
+                ) from exc
+            except ScopeError as exc:
+                # A root that offers no fields to translate against is a
+                # registry problem, not a bug in this service — tell the two
+                # apart rather than letting this surface as an undifferentiated
+                # 500. Deliberately not a blanket `except Exception`: a real bug
+                # here should still 500 rather than claim to be retryable.
+                logger.exception("registry-shaped scope failure")
+                raise HTTPException(
+                    status_code=503,
+                    detail="The query service is temporarily unavailable.",
+                ) from exc
+        finally:
+            _request_usage.reset(token)
         # `by_alias=True` is REQUIRED, not cosmetic. `Aggregate.alias` is
         # serialised as `as` (a Python keyword), and without the flag this
         # emits `{"alias": ...}` — a payload the host's compiler does not
         # understand. This has regressed silently before: every other test
         # here reads the parsed model rather than the emitted JSON, so only
         # a test against the wire format itself catches it.
-        return response.model_dump(mode="json", by_alias=True)
+        body = response.model_dump(mode="json", by_alias=True)
+        # Every response shape (ok, needs_clarification, refused) returns
+        # from here, so this covers all three — the harness needs the token
+        # cost of the calls that produced whichever shape came back.
+        body["usage"] = usage
+        return body
 
     return app
 
 
 def _log_usage(record: dict) -> None:
+    """The single choke point both providers' `on_usage` callback reaches.
+
+    Always logs. Additionally appends to the in-flight request's capture
+    list, when `translate_endpoint` has set one — this is the seam that
+    fills the response body's `"usage"` field, not just the log line.
+    Capturing here rather than wrapping the callback at each construction
+    site (`_build_provider`, and wherever a test injects a provider) covers
+    every caller for free: both adapters, and anything else built with
+    `on_usage=_log_usage`, already funnel through this one function.
+    """
     usage_log.info("usage %s", record)
+    bucket = _request_usage.get()
+    if bucket is not None:
+        bucket.append(record)
 
 
 def _build_provider(settings) -> Provider:

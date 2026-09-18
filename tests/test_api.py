@@ -411,3 +411,105 @@ def test_the_usage_log_actually_emits(tmp_path):
         usage_log.handlers[:] = saved
     assert "schema_name" in written
     assert "output_tokens" in written
+
+
+class UsageReportingProvider:
+    """A `FakeProvider` that also reports usage, the way a real adapter does.
+
+    `FakeProvider` never calls `on_usage`, so it cannot exercise the capture
+    path on its own. This stands in for a real provider by calling
+    `_log_usage` -- the same function both adapters' `on_usage` is wired to
+    -- from inside `complete`, mid-request, exactly where a real usage
+    record would land.
+    """
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.calls: list[dict] = []
+
+    def complete(self, system, question, schema, schema_name):
+        from cert_nlq.api.app import _log_usage
+
+        self.calls.append({"schema_name": schema_name})
+        nxt = self._responses.pop(0)
+        if isinstance(nxt, Exception):
+            raise nxt
+        _log_usage({
+            "schema_name": schema_name,
+            "model": "test-model",
+            "uncached_input_tokens": len(self.calls),
+            "cached_input_tokens": 0,
+            "cache_write_tokens": 0,
+            "output_tokens": 1,
+            "reasoning_tokens": 0,
+        })
+        return nxt
+
+
+def test_every_translate_response_carries_a_usage_list(registry):
+    """`usage` is present on every response shape, not added to one and
+    forgotten on the others -- all three return from the same line."""
+    ok = _client(registry, [ROUTE, GOOD]).post(
+        "/translate", json={"question": "active widgets", "now_year": 2026}
+    ).json()
+    assert ok["status"] == "ok"
+    assert ok["usage"] == []
+
+    refused = _client(
+        registry, [{"root": "nope", "joins": [], "groups": []}]
+    ).post("/translate", json={"question": "what is the weather"}).json()
+    assert refused["status"] == "refused"
+    assert refused["usage"] == []
+
+
+def test_a_usage_record_captured_during_a_request_lands_in_its_own_body(registry):
+    """The provider's usage callback fires mid-request; the record it hands
+    `_log_usage` must appear in the body of the request that triggered it."""
+    provider = UsageReportingProvider([ROUTE, GOOD])
+    client = TestClient(
+        create_app(StubRegistry(registry), provider, service_token=TOKEN),
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    response = client.post(
+        "/translate", json={"question": "active widgets", "now_year": 2026}
+    )
+    assert response.status_code == 200
+    usage = response.json()["usage"]
+    # One record per model call this request made: routing, then translation.
+    assert len(usage) == 2
+    assert all(record["model"] == "test-model" for record in usage)
+
+
+def test_log_usage_with_no_request_in_flight_only_logs(caplog):
+    """Outside a request the ContextVar is unset (`None`), and a call must
+    still just log -- never raise for lack of a bucket to append to."""
+    from cert_nlq.api.app import _log_usage
+
+    with caplog.at_level("INFO", logger="cert_nlq.usage"):
+        _log_usage({"schema_name": "route", "model": "m", "output_tokens": 3})
+    assert any("output_tokens" in message for message in caplog.messages)
+
+
+def test_two_sequential_requests_do_not_leak_usage_into_each_other(registry):
+    """Uvicorn's threadpool interleaves requests; a record from one request
+    reaching another's body would silently mis-price both."""
+    provider = UsageReportingProvider([ROUTE, GOOD, ROUTE, GOOD])
+    client = TestClient(
+        create_app(StubRegistry(registry), provider, service_token=TOKEN),
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    first = client.post(
+        "/translate", json={"question": "active widgets", "now_year": 2026}
+    ).json()
+    second = client.post(
+        "/translate", json={"question": "active widgets", "now_year": 2026}
+    ).json()
+
+    assert len(first["usage"]) == 2
+    assert len(second["usage"]) == 2
+    # Each provider call counts total calls made so far, so the two
+    # requests' records are distinguishable -- and must not overlap.
+    first_counts = {record["uncached_input_tokens"] for record in first["usage"]}
+    second_counts = {record["uncached_input_tokens"] for record in second["usage"]}
+    assert first_counts == {1, 2}
+    assert second_counts == {3, 4}
