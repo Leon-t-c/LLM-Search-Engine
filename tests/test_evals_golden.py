@@ -553,7 +553,7 @@ def test_ambiguous_wording_makes_a_case_hard_whatever_its_shape(registry):
 
 def test_clarify_and_refusal_slices_carry_no_structural_slice(registry):
     clarify = _built(expect={"kind": "clarify", "field": "widget.status"})
-    refusal = _built(expect={"kind": "refusal", "reason": "not_a_query"})
+    refusal = _built(expect={"kind": "refusal", "reason": "field_not_in_schema"})
     assert derive_slices(clarify, registry) == {"clarification"}
     assert derive_slices(refusal, registry) == {"refusal"}
     assert derive_difficulty(clarify, registry) == "medium"
@@ -773,3 +773,88 @@ def test_a_grouped_amounts_commas_are_part_of_the_number(tmp_path, registry):
             registry,
         )
     assert "5,000,000" in str(exc.value)
+
+
+def test_a_not_a_query_refusal_is_easy_and_other_reasons_are_not(registry):
+    """Owner ruling, 2026-09-18: a greeting is not a medium task. The rule
+    sits outside the structural reading because no structure expresses it --
+    and it stops short of the other reasons, where refusing a question about
+    a table that nearly exists is genuinely not easy."""
+    greeting = _built(expect={"kind": "refusal", "reason": "not_a_query"})
+    missing = _built(expect={"kind": "refusal", "reason": "field_not_in_schema"})
+    assert derive_difficulty(greeting, registry) == "easy"
+    assert derive_difficulty(missing, registry) == "medium"
+
+
+def test_an_ambiguous_not_a_query_case_is_still_hard(registry):
+    """The hard checks run first: a hand tag beats the reason shortcut."""
+    case = _built(
+        tags=["ambiguous-wording"],
+        expect={"kind": "refusal", "reason": "not_a_query"},
+    )
+    assert derive_difficulty(case, registry) == "hard"
+
+
+def test_a_paraphrase_whose_expectation_differs_is_rejected(tmp_path, registry):
+    """A rewording that changes the answer is not a paraphrase. It belongs in
+    the set as a case of its own, with its own id and its own gold."""
+    other = {
+        "root": "widget",
+        "where": {"combinator": "AND",
+                  "children": [{"field": "widget.status", "op": "=", "value": "X"}]},
+    }
+    with pytest.raises(GoldenError) as exc:
+        load_golden(
+            _write(
+                tmp_path,
+                _case("g-120", question="active widgets in 2024"),
+                _paraphrase("g-120-p1", "g-120", "2024 widgets, active",
+                            expect={"kind": "ok", "payload": other}),
+            ),
+            registry,
+        )
+    message = str(exc.value)
+    assert "g-120-p1" in message and "g-120" in message
+    assert "expectation differs" in message
+
+
+def test_a_paraphrase_may_not_change_the_kind_or_the_field(tmp_path, registry):
+    with pytest.raises(GoldenError) as exc:
+        load_golden(
+            _write(
+                tmp_path,
+                _case("g-121", question="widgets in a state",
+                      expect={"kind": "clarify", "field": "widget.status"}),
+                _paraphrase("g-121-p1", "g-121", "a state of widgets",
+                            expect={"kind": "clarify", "field": "widget.region"}),
+            ),
+            registry,
+        )
+    assert "expectation differs" in str(exc.value)
+
+
+def test_an_int_gold_value_does_not_match_a_float_one(tmp_path, registry):
+    """Value equality would call `2024` and `2024.0` the same answer; the
+    gold conventions pin years as ints and money as floats, so the comparison
+    is over the rendered JSON instead."""
+    as_float = {
+        "root": "widget",
+        "where": {"combinator": "AND",
+                  "children": [{"field": "widget.year", "op": "=", "value": 2024.0}]},
+    }
+    as_int = {
+        "root": "widget",
+        "where": {"combinator": "AND",
+                  "children": [{"field": "widget.year", "op": "=", "value": 2024}]},
+    }
+    with pytest.raises(GoldenError, match="expectation differs"):
+        load_golden(
+            _write(
+                tmp_path,
+                _case("g-122", question="widgets from 2024",
+                      expect={"kind": "ok", "payload": as_int}),
+                _paraphrase("g-122-p1", "g-122", "2024 widgets",
+                            expect={"kind": "ok", "payload": as_float}),
+            ),
+            registry,
+        )

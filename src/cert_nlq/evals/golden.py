@@ -406,13 +406,17 @@ def derive_difficulty(case: GoldenCase, registry: Registry) -> str:
     question hand-tagged `ambiguous-wording`; easy = exactly one condition
     and no join and no aggregate; everything else is medium.
 
-    Read literally, "one condition" is something only an ok case has, so a
-    clarify or refusal case lands in `medium` unless it is hand-tagged
-    ambiguous or overridden. That is deliberate rather than an oversight:
-    refusing "hello" is easy and refusing a question about a table that
-    nearly exists is not, and nothing structural tells the two apart, so
-    the honest default is the middle bucket and the escape hatch is
-    `difficulty_override` with its mandatory note.
+    One rule sits outside the structural reading, because the structure
+    cannot express it (owner ruling, 2026-09-18): a `not_a_query` refusal is
+    **easy**. A greeting is not a medium task, and refusing one is not the
+    same job as refusing a question about a table that nearly exists. Every
+    other refusal reason, and every clarify case, stays `medium` -- "one
+    condition" is something only an ok case has, and nothing structural
+    separates a hard refusal from an ordinary one, so the honest default is
+    the middle bucket with `difficulty_override` as the escape hatch.
+
+    (`SLICE_RUBRIC_VERSION` is unchanged at "1": this rule landed before the
+    first scored run, so there are no stored rows it could reinterpret.)
     """
     if case.difficulty_override is not None:
         return case.difficulty_override
@@ -421,6 +425,11 @@ def derive_difficulty(case: GoldenCase, registry: Registry) -> str:
     slices = derive_slices(case, registry)
     if "nested-logic" in slices:
         return "hard"
+    if (
+        isinstance(case.expect, ExpectRefusal)
+        and case.expect.reason == RefusalReason.NOT_A_QUERY.value
+    ):
+        return "easy"
     if isinstance(case.expect, ExpectOk):
         payload = case.expect.payload
         root_name = payload.get("root")
@@ -552,6 +561,16 @@ def _literals(question: str) -> list[str]:
     return _NUMBER_RE.findall(question) + _CODE_RE.findall(question)
 
 
+def _expectation_text(case: GoldenCase) -> str:
+    """One case's whole expectation, rendered for an exact comparison.
+
+    Key order is not meaning, so keys are sorted; the *values* are rendered
+    as written, so `2024` and `2024.0` -- which the gold conventions treat
+    as different facts, an int year and a float -- do not compare equal.
+    """
+    return json.dumps(case.expect.model_dump(), sort_keys=True)
+
+
 def _check_paraphrases(cases: list[GoldenCase]) -> list[str]:
     """`paraphrase_of` resolves, does not chain, and preserves the literals.
 
@@ -562,6 +581,15 @@ def _check_paraphrases(cases: list[GoldenCase]) -> list[str]:
     A rewording may reorder, resynonymise and change register; it may not
     drop the number. The other half -- did the *meaning* survive -- is a
     human read, which is why every paraphrase is born `review`-tagged.
+
+    The expectation itself is checked outright: a paraphrase asserts the
+    same answer as its original, down to the serialised text of the gold
+    payload, or it is not a paraphrase. Value equality would not be enough
+    -- Python calls `2024` and `2024.0` the same number and this file's own
+    conventions do not -- so the comparison is over the rendered JSON, which
+    also means a divergence is reportable rather than merely detectable. A
+    rewording that genuinely changes scope belongs in the set as a case of
+    its own, with its own id and its own gold.
     """
     by_id = {case.id: case for case in cases}
     problems = []
@@ -583,6 +611,12 @@ def _check_paraphrases(cases: list[GoldenCase]) -> list[str]:
                 f"level deep, so point at the original"
             )
             continue
+        if _expectation_text(case) != _expectation_text(original):
+            problems.append(
+                f"{case.id}: expectation differs from its original "
+                f"{original_id!r} -- a rewording that changes the answer is "
+                f"not a paraphrase; make it a case of its own"
+            )
         lost = [
             token
             for token in _literals(original.question)

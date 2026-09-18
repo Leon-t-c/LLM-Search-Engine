@@ -108,14 +108,15 @@ model's job, not the ruler's.
   the `group_by` come from different tables, or the aggregate runs over a
   one-to-many join), or two or more joins, or the question is tagged
   `ambiguous-wording`.
-- **easy** — exactly one condition, no join, no aggregate.
+- **easy** — exactly one condition, no join, no aggregate; or a `not_a_query`
+  refusal (owner ruling, 2026-09-18: a greeting is not a medium task).
 - **medium** — everything else.
 
-Read literally, "one condition" is something only an ok case has, so a clarify
-or refusal case is `medium` unless it is tagged ambiguous or overridden. That
-is deliberate: refusing "hello" is easy and refusing a question about a table
-that nearly exists is not, and nothing structural tells them apart, so the
-honest default is the middle bucket and the escape hatch is
+"One condition" is something only an ok case has, so every other refusal
+reason, and every clarify case, is `medium` unless it is tagged ambiguous or
+overridden. That is deliberate: refusing a question about a table that nearly
+exists is not easy, and nothing structural separates it from an ordinary
+refusal — so the honest default is the middle bucket and the escape hatch is
 `difficulty_override` with its mandatory note.
 
 `SLICE_RUBRIC_VERSION` in `evals/golden.py` is bumped whenever either
@@ -133,10 +134,14 @@ queries. Generation is automated; inheritance is confirmed. Three layers:
    register — terse lawyer shorthand, a full sentence, a pile of keywords — but
    must never touch an operative token: comparators ("after", "at least",
    "over"), numbers, years, negations, quantifiers, or coded words.
-2. **Mechanical guard, in the loader.** Every number and code-shaped literal in
-   the original's question must appear verbatim in the paraphrase's. A
-   violation is a load-time failure naming both ids. Cheap, and it catches the
-   classic boundary drift.
+2. **Mechanical guards, in the loader.** Every number and code-shaped literal
+   in the original's question must appear verbatim in the paraphrase's — cheap,
+   and it catches the classic boundary drift. And the paraphrase's expectation
+   must be **identical** to its original's, compared as rendered JSON so that
+   `2024` and `2024.0` stay different facts: a rewording that changes the
+   answer is not a paraphrase, and belongs in the set as a case of its own with
+   its own id and its own gold. Either violation is a load-time failure naming
+   both ids.
 3. **Review queue.** Every paraphrase is born `review`-tagged and is read by
    the owner as a side-by-side question pair, gold hidden: the only judgement
    is "same query? y/n". The tag comes off on confirmation. The primary
