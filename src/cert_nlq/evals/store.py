@@ -25,7 +25,15 @@ frames deep in SQLAlchemy's own import machinery.
 from __future__ import annotations
 
 try:
-    from sqlalchemy import JSON, DateTime, ForeignKey, TypeDecorator, create_engine, select
+    from sqlalchemy import (
+        JSON,
+        DateTime,
+        ForeignKey,
+        TypeDecorator,
+        create_engine,
+        event,
+        select,
+    )
     from sqlalchemy.orm import (
         DeclarativeBase,
         Mapped,
@@ -115,10 +123,17 @@ class UTCDateTime(TypeDecorator):
     ISO string and hands back a naive one on read, silently dropping
     `tzinfo`. `started_at` is documented as UTC (brief: "started_at
     (UTC)"), so rather than let every caller remember to re-attach
-    `tzinfo=UTC` after a load, this type does it once, here: on the way in,
-    a naive datetime is assumed already UTC and an aware one is converted
-    to UTC before the tzinfo is stripped for storage; on the way out, UTC
-    is reattached to the naive value sqlite handed back.
+    `tzinfo=UTC` after a load, this type does it once, here: a tz-aware
+    value is converted to UTC before the tzinfo is stripped for storage,
+    and UTC is reattached to the naive value sqlite hands back on read.
+
+    A **naive** datetime is rejected outright, not guessed at. `started_at`
+    feeds a run's identity; silently assuming a naive value already means
+    UTC would let a caller's local-time bug (an un-tz-aware
+    `datetime.now()`, say) through as a plausible-looking timestamp that is
+    wrong by the caller's UTC offset, with no signal anywhere that it
+    happened. A caller that has a naive timestamp has a bug upstream, and
+    the fix belongs there, not in a coercion here.
     """
 
     impl = DateTime
@@ -127,9 +142,14 @@ class UTCDateTime(TypeDecorator):
     def process_bind_param(self, value, dialect):
         if value is None:
             return None
-        if value.tzinfo is not None:
-            value = value.astimezone(UTC)
-        return value.replace(tzinfo=None)
+        if value.tzinfo is None:
+            raise ValueError(
+                "UTCDateTime requires a tz-aware datetime (got a naive one); "
+                "attach tzinfo=UTC (or any tzinfo -- it is converted to UTC "
+                "here) at the call site rather than relying on this column "
+                "to guess"
+            )
+        return value.astimezone(UTC).replace(tzinfo=None)
 
     def process_result_value(self, value, dialect):
         if value is None:
@@ -159,6 +179,12 @@ class RunRecord(Base):
     service_url: Mapped[str] = mapped_column()
     concurrency: Mapped[int] = mapped_column()
     golden_path: Mapped[str] = mapped_column()
+    #: Caller-supplied, like `prompt_hash` -- this module does not read the
+    #: golden file, so it cannot compute this itself. The intended
+    #: convention (Task 6's runner is the one that implements it): sha256
+    #: of the golden.jsonl file's raw bytes, computed at load time, so two
+    #: runs' `golden_hash` values agree iff they replayed byte-identical
+    #: golden sets. This comment is the contract until Task 6 lands.
     golden_hash: Mapped[str] = mapped_column()
     notes: Mapped[str | None] = mapped_column(default=None)
     #: `evals.EVALUATOR_VERSION` at run time -- the version of what the
@@ -363,6 +389,25 @@ class Store:
             return list(records)
 
 
+def _enable_sqlite_foreign_keys(dbapi_connection, connection_record) -> None:
+    """`PRAGMA foreign_keys=ON`, once per new DBAPI connection.
+
+    SQLite ships foreign-key enforcement *off* by default, per connection --
+    without this, `ResultRecord.run_id`'s `ForeignKey(..., ondelete="CASCADE")`
+    is pure documentation: the ORM's own `cascade="all, delete-orphan"`
+    still cleans up a `session.delete(run)`, but a bulk `delete(RunRecord)...`
+    statement (or any other write that bypasses the ORM's Python-side
+    cascade) leaves orphaned `results` rows behind, silently, because the
+    database itself was never asked to enforce the constraint. Registered
+    on the engine's `connect` event, not run once at open time, because a
+    connection pool can open more than one DBAPI connection over an
+    engine's life and each one starts with the pragma off again.
+    """
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.close()
+
+
 def open_store(path: str) -> Store:
     """Open (creating if needed) a sqlite-backed store at `path`.
 
@@ -372,6 +417,7 @@ def open_store(path: str) -> Store:
     """
     url = "sqlite:///:memory:" if path == ":memory:" else f"sqlite:///{path}"
     engine = create_engine(url)
+    event.listen(engine, "connect", _enable_sqlite_foreign_keys)
     Base.metadata.create_all(engine)
     return Store(engine)
 

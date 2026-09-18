@@ -5,7 +5,7 @@ import builtins
 import importlib
 import sys
 import types
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -117,6 +117,51 @@ def test_record_and_load_run_round_trips_every_identity_field():
     assert run.stratify == 40
     assert run.canonical_only is True
     assert rows == []
+
+
+def test_utc_datetime_rejects_a_naive_value_directly():
+    """`UTCDateTime.process_bind_param` itself, not through a full
+    session flush -- the ORM wraps a `process_bind_param` exception in
+    `sqlalchemy.exc.StatementError` by the time it would reach a caller of
+    `record_run`, which would make this assertion depend on SQLAlchemy's
+    own error-wrapping behaviour rather than on what this type decided.
+    Calling the method directly pins the type's own contract instead.
+    """
+    naive = datetime(2026, 9, 18, 12, 0, 0)  # noqa: DTZ001 - naive on purpose
+    with pytest.raises(ValueError, match="tz-aware"):
+        store_module.UTCDateTime().process_bind_param(naive, dialect=None)
+
+
+def test_record_run_rejects_a_naive_started_at_end_to_end():
+    """The same rejection, exercised through the real `record_run` path --
+    confirms the naive value actually reaches `UTCDateTime` unmodified and
+    the flush surfaces *some* error, without pinning SQLAlchemy's wrapper
+    exception type.
+    """
+    store = open_store(":memory:")
+    naive = datetime(2026, 9, 18, 12, 0, 0)  # noqa: DTZ001 - naive on purpose
+    with pytest.raises(Exception, match="tz-aware"):
+        store.record_run(started_at=naive, **_identity())
+
+
+def test_utc_datetime_converts_a_non_utc_aware_value_to_utc_on_bind():
+    # UTC-5: 09:00 there is 14:00 UTC.
+    local = datetime(2026, 9, 18, 9, 0, 0, tzinfo=timezone(timedelta(hours=-5)))
+    bound = store_module.UTCDateTime().process_bind_param(local, dialect=None)
+    assert bound == datetime(2026, 9, 18, 14, 0, 0)  # noqa: DTZ001 - naive storage form
+    assert bound.tzinfo is None  # stripped for storage, as UTC
+
+
+def test_record_run_converts_a_non_utc_aware_started_at_to_utc():
+    store = open_store(":memory:")
+    # UTC-5: 09:00 there is 14:00 UTC.
+    local = datetime(2026, 9, 18, 9, 0, 0, tzinfo=timezone(timedelta(hours=-5)))
+    run_id = store.record_run(started_at=local, **_identity())
+
+    run, _ = store.load_run(run_id)
+
+    assert run.started_at == datetime(2026, 9, 18, 14, 0, 0, tzinfo=UTC)
+    assert run.started_at.tzinfo == UTC
 
 
 def test_record_run_generates_a_uuid4_hex_id_by_default():
@@ -297,6 +342,33 @@ def test_deleting_a_run_cascades_to_its_results():
     with store_module.Session(store._engine) as session:
         run = session.get(store_module.RunRecord, run_id)
         session.delete(run)
+        session.commit()
+
+    with store_module.Session(store._engine) as session:
+        remaining = session.query(store_module.ResultRecord).filter_by(run_id=run_id).all()
+        assert remaining == []
+
+
+def test_bulk_delete_of_a_run_cascades_at_the_database_layer():
+    """The FK itself, not the ORM's Python-side cascade.
+
+    `session.delete(run)` (the test above) cascades even without
+    `PRAGMA foreign_keys=ON`, because SQLAlchemy's ORM walks the
+    `cascade="all, delete-orphan"` relationship in Python regardless of
+    what the database enforces. A bulk `DELETE` statement skips that
+    relationship walk entirely and asks the database to do the deleting --
+    so this only passes if `open_store` actually turned sqlite's
+    foreign-key enforcement on.
+    """
+    from sqlalchemy import delete
+
+    store = open_store(":memory:")
+    run_id = store.record_run(**_identity())
+    store.record_rows(run_id, [_full_row(), _full_row(case_id="case-2")])
+
+    with store_module.Session(store._engine) as session:
+        stmt = delete(store_module.RunRecord).where(store_module.RunRecord.id == run_id)
+        session.execute(stmt)
         session.commit()
 
     with store_module.Session(store._engine) as session:
