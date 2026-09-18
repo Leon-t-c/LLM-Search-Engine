@@ -133,6 +133,15 @@ def test_wilson_successes_out_of_range_raises():
         wilson(11, 10)
 
 
+def test_wilson_successes_out_of_range_with_n_zero_raises():
+    # n == 0 alone is the legitimate degenerate case (-> (None, None)); a
+    # positive successes count against a zero n is not a "no data" case,
+    # it's an impossible argument, and must not be swallowed by the n == 0
+    # early return.
+    with pytest.raises(ValueError):
+        wilson(5, 0)
+
+
 # --------------------------------------------------------------------------
 # mcnemar_exact()
 # --------------------------------------------------------------------------
@@ -180,14 +189,14 @@ def test_mcnemar_empty_rows_is_one():
 def test_mcnemar_mismatched_case_ids_raises_loudly():
     rows_a = [_row("c1", e2e_correct=True)]
     rows_b = [_row("c2", e2e_correct=True)]
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError, match=r"c1.*c2"):
         mcnemar_exact(rows_a, rows_b, outcome=_e2e_outcome)
 
 
 def test_mcnemar_mismatched_length_raises_loudly():
     rows_a = [_row("c1", e2e_correct=True), _row("c2", e2e_correct=True)]
     rows_b = [_row("c1", e2e_correct=True)]
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         mcnemar_exact(rows_a, rows_b, outcome=_e2e_outcome)
 
 
@@ -440,14 +449,44 @@ def test_paired_delta_ci_mismatched_case_ids_raises_loudly():
     rows_a = [_row("c1", e2e_correct=True)]
     rows_b = [_row("c2", e2e_correct=True)]
     metric = _e2e_metric
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError, match=r"c1.*c2"):
         paired_delta_ci(rows_a, rows_b, metric, _case_id_family_of, seed=1)
+
+
+def test_paired_delta_ci_duplicate_case_id_raises_loudly():
+    # A duplicated case_id would otherwise silently vanish into the dict
+    # build (the second row winning, the first dropped with no warning) --
+    # this must be caught before it can quietly change delta.
+    rows_a = [
+        _row("c1", e2e_correct=True),
+        _row("c1", e2e_correct=False),
+    ]
+    rows_b = [
+        _row("c1", e2e_correct=True),
+        _row("c1", e2e_correct=True),
+    ]
+    with pytest.raises(ValueError, match="c1"):
+        paired_delta_ci(rows_a, rows_b, _e2e_metric, _case_id_family_of, seed=1)
 
 
 def test_paired_delta_ci_empty_rows_returns_none_triple():
     metric = _e2e_metric
     result = paired_delta_ci([], [], metric, _case_id_family_of, seed=1)
     assert result == (None, None, None)
+
+
+def test_paired_delta_ci_zero_resamples_returns_delta_only():
+    rows_a = [_row("c1", e2e_correct=True), _row("c2", e2e_correct=True)]
+    rows_b = [_row("c1", e2e_correct=True), _row("c2", e2e_correct=False)]
+    delta, lo, hi = paired_delta_ci(
+        rows_a, rows_b, _e2e_metric, _case_id_family_of, seed=1, n_resamples=0
+    )
+    # The point estimate is still computable with zero resamples; the
+    # interval is not (there is nothing to build it from), and this must
+    # not raise IndexError trying anyway.
+    assert delta == pytest.approx(0.5)
+    assert lo is None
+    assert hi is None
 
 
 def test_paired_delta_ci_same_seed_twice_is_byte_identical():
@@ -514,3 +553,34 @@ def test_latency_summary_requires_family_of_and_seed_with_other():
     rows_b = [_row("c0", latency_ms=90.0)]
     with pytest.raises(AssertionError):
         latency_summary(rows_a, other=rows_b)
+
+
+def test_latency_summary_median_delta_ci_duplicate_case_id_raises_loudly():
+    rows_a = [
+        _row("c0", latency_ms=100.0),
+        _row("c0", latency_ms=200.0),
+    ]
+    rows_b = [
+        _row("c0", latency_ms=90.0),
+        _row("c0", latency_ms=90.0),
+    ]
+    with pytest.raises(ValueError, match="c0"):
+        latency_summary(
+            rows_a, other=rows_b, family_of=_case_id_family_of, seed=5
+        )
+
+
+def test_latency_summary_median_delta_ci_zero_resamples_returns_delta_only():
+    rows_a = [_row("c0", latency_ms=110.0), _row("c1", latency_ms=100.0)]
+    rows_b = [_row("c0", latency_ms=90.0), _row("c1", latency_ms=100.0)]
+    summary = latency_summary(
+        rows_a,
+        other=rows_b,
+        family_of=_case_id_family_of,
+        seed=5,
+        n_resamples=0,
+    )
+    delta, lo, hi = summary["median_delta_ci"]
+    assert delta == pytest.approx(10.0)  # median([20, 0]) == 10
+    assert lo is None
+    assert hi is None

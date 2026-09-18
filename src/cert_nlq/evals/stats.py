@@ -84,10 +84,10 @@ def wilson(
     `(0.0, 1.0)` or any other placeholder would claim a measurement that
     was not made.
     """
+    if not 0 <= successes <= max(n, 0):
+        raise ValueError(f"successes ({successes}) must be between 0 and n ({n})")
     if n == 0:
         return None, None
-    if not 0 <= successes <= n:
-        raise ValueError(f"successes ({successes}) must be between 0 and n ({n})")
     if confidence not in _WILSON_Z:
         raise ValueError(
             f"unsupported confidence {confidence!r}; wilson() only "
@@ -214,6 +214,58 @@ def family_consistency(
 # ---------------------------------------------------------------------------
 
 
+def _duplicate_ids(ids: Sequence[str]) -> list[str]:
+    """Every id in `ids` that appears more than once, in first-seen order.
+    `[]` when every id is unique."""
+    seen: set[str] = set()
+    dups: list[str] = []
+    dup_seen: set[str] = set()
+    for cid in ids:
+        if cid in seen and cid not in dup_seen:
+            dups.append(cid)
+            dup_seen.add(cid)
+        seen.add(cid)
+    return dups
+
+
+def _pair_rows_by_case_id(
+    rows_a: Sequence[Row], rows_b: Sequence[Row], caller: str
+) -> list[tuple[Row, Row]]:
+    """`(row_a, row_b)` for every shared `case_id`, in `rows_a`'s order --
+    the alignment step `paired_delta_ci` and `latency_summary`'s
+    `median_delta_ci` both need. Raises `ValueError`, never silently
+    tolerates a mismatch: a duplicated `case_id` on either side would
+    otherwise vanish into a dict build (the second row silently winning),
+    and a `case_id` present on only one side would otherwise vanish from a
+    set-equality check with no indication of *which* id was the problem --
+    both are caller bugs worth failing on loudly, by name, not silently
+    mis-pairing or dropping a row.
+    """
+    ids_a = [row.case_id for row in rows_a]
+    ids_b = [row.case_id for row in rows_b]
+    dup_a = _duplicate_ids(ids_a)
+    if dup_a:
+        raise ValueError(f"{caller}: duplicated case_id(s) in rows_a: {dup_a}")
+    dup_b = _duplicate_ids(ids_b)
+    if dup_b:
+        raise ValueError(f"{caller}: duplicated case_id(s) in rows_b: {dup_b}")
+    set_a, set_b = set(ids_a), set(ids_b)
+    if set_a != set_b:
+        only_in_a = sorted(set_a - set_b)
+        only_in_b = sorted(set_b - set_a)
+        detail = []
+        if only_in_a:
+            detail.append(f"only in rows_a: {only_in_a}")
+        if only_in_b:
+            detail.append(f"only in rows_b: {only_in_b}")
+        raise ValueError(
+            f"{caller} requires rows_a and rows_b to name the same "
+            f"case_ids; " + "; ".join(detail)
+        )
+    b_by_id = {row.case_id: row for row in rows_b}
+    return [(row_a, b_by_id[row_a.case_id]) for row_a in rows_a]
+
+
 def _percentile(sorted_values: Sequence[float], q: float) -> float:
     """Linear interpolation between order statistics -- numpy's default
     method ("R type 7"), the interpolation convention this module's
@@ -252,7 +304,13 @@ def cluster_bootstrap(
     narrow interval. `statistic` receives each resample's rows (all of every
     sampled family's members, concatenated) and returns a float, or `None`
     if the resample cannot support the statistic (e.g. a zero denominator);
-    `None` resamples are dropped before taking percentiles.
+    `None` resamples are dropped before taking percentiles. The returned
+    interval is therefore conditional on the resamples where `statistic`
+    was defined, not on all `n_resamples` draws -- harmless while `None`
+    resamples are rare, but a caller whose `statistic` is frequently
+    undefined (e.g. a metric with a small, easily-zero denominator on a
+    small family count) should know the effective resample count backing
+    the interval can be smaller than `n_resamples` says.
 
     Seeded with `random.Random(seed)`, so identical `(rows, seed)` produce
     a byte-identical interval every time -- the caller (the run report) is
@@ -303,25 +361,25 @@ def paired_delta_ci(
     negate `metric` (or read the sign as "positive = A worse") -- this
     function does not know which direction is good for an arbitrary metric.
 
-    `rows_a` and `rows_b` must name the same set of `case_id`s -- the paired
-    design this whole layer exploits -- asserted, not silently tolerated.
-    Per-case differences are averaged within family first (one number per
-    family), so a 5-paraphrase family and a 1-case family both count as one
-    family in the resample, matching `cluster_bootstrap`'s own per-family
+    `rows_a` and `rows_b` must each carry unique `case_id`s and must name
+    the same set of `case_id`s -- the paired design this whole layer
+    exploits -- checked by `_pair_rows_by_case_id`, which raises
+    `ValueError` naming the duplicated or mismatched id(s) rather than
+    silently tolerating them (a duplicate would otherwise vanish into a
+    dict build, the second row winning with no warning). Per-case
+    differences are averaged within family first (one number per family),
+    so a 5-paraphrase family and a 1-case family both count as one family
+    in the resample, matching `cluster_bootstrap`'s own per-family
     weighting; `delta` is the mean of those per-family means.
 
     `(None, None, None)` when there are no families to resample (`rows_a`
-    and `rows_b` both empty).
+    and `rows_b` both empty). `(delta, None, None)` when `n_resamples <= 0`
+    -- the point estimate stands, but there are no resamples to build an
+    interval from.
     """
-    a_by_id = {row.case_id: row for row in rows_a}
-    b_by_id = {row.case_id: row for row in rows_b}
-    assert set(a_by_id) == set(b_by_id), (
-        "paired_delta_ci requires rows_a and rows_b to name the same "
-        f"case_ids; got {len(a_by_id)} vs {len(b_by_id)} distinct ids"
-    )
+    pairs = _pair_rows_by_case_id(rows_a, rows_b, "paired_delta_ci")
     diffs_by_family: dict[str, list[float]] = defaultdict(list)
-    for case_id, row_a in a_by_id.items():
-        row_b = b_by_id[case_id]
+    for row_a, row_b in pairs:
         fid = family_of(row_a)
         diffs_by_family[fid].append(metric(row_a) - metric(row_b))
     family_ids = list(diffs_by_family)
@@ -332,6 +390,11 @@ def paired_delta_ci(
         fid: statistics.fmean(diffs) for fid, diffs in diffs_by_family.items()
     }
     delta = statistics.fmean(family_means.values())
+    if n_resamples <= 0:
+        # No resamples to draw: the point estimate stands, but there is
+        # nothing to build an interval from -- (delta, None, None), not an
+        # IndexError out of _percentile on an empty resample list.
+        return delta, None, None
     rng = random.Random(seed)
     values: list[float] = []
     for _ in range(n_resamples):
@@ -364,11 +427,15 @@ def mcnemar_exact(
     `n10` counts `case_id`s where `outcome(row_a)` is true and
     `outcome(row_b)` is false (A right, B wrong only); `n01` the reverse.
     `rows_a`/`rows_b` must be the same length and carry the same
-    `case_id`s in the same order -- **asserted, loudly**: this function
-    does not re-pair by id itself, because the common caller already has
-    two aligned row lists straight off a per-case join, and a caller that
-    does not have aligned lists has a bug worth failing on immediately
-    rather than silently mis-pairing rows.
+    `case_id`s in the same order -- checked, loudly, by raising
+    `ValueError` (never a bare `assert`, which `python -O` would strip --
+    and this is the guard protecting the single confirmatory p-value of
+    the whole experiment, so it may not silently evaporate under an
+    interpreter flag): this function does not re-pair by id itself,
+    because the common caller already has two aligned row lists straight
+    off a per-case join, and a caller that does not have aligned lists has
+    a bug worth failing on immediately, naming the first mismatched
+    `case_id`, rather than silently mis-pairing rows.
 
     Does **not** filter to canonical cases -- the report owns that filter
     (module docstring); this stays pure over whatever two aligned row
@@ -377,14 +444,18 @@ def mcnemar_exact(
     Zero discordant pairs -> `p = 1.0`: the models disagreed nowhere, which
     is a genuine (if uninformative) answer, not a fallback.
     """
-    assert len(rows_a) == len(rows_b), (
-        f"mcnemar_exact requires aligned rows: got {len(rows_a)} rows_a vs "
-        f"{len(rows_b)} rows_b"
-    )
-    assert [r.case_id for r in rows_a] == [r.case_id for r in rows_b], (
-        "mcnemar_exact requires rows_a and rows_b to carry the same "
-        "case_ids in the same order"
-    )
+    if len(rows_a) != len(rows_b):
+        raise ValueError(
+            f"mcnemar_exact requires aligned rows: got {len(rows_a)} rows_a "
+            f"vs {len(rows_b)} rows_b"
+        )
+    for index, (row_a, row_b) in enumerate(zip(rows_a, rows_b, strict=True)):
+        if row_a.case_id != row_b.case_id:
+            raise ValueError(
+                "mcnemar_exact requires rows_a and rows_b to carry the same "
+                f"case_ids in the same order; first mismatch at index "
+                f"{index}: {row_a.case_id!r} vs {row_b.case_id!r}"
+            )
     n10 = n01 = 0
     for row_a, row_b in zip(rows_a, rows_b, strict=True):
         oa, ob = bool(outcome(row_a)), bool(outcome(row_b))
@@ -440,15 +511,9 @@ def _median_delta_ci(
     another counts proportionally more within a draw, but which families
     are drawn is still what carries the resampling variance).
     """
-    a_by_id = {row.case_id: row for row in rows_a}
-    b_by_id = {row.case_id: row for row in rows_b}
-    assert set(a_by_id) == set(b_by_id), (
-        "latency_summary's median_delta_ci requires rows and other to name "
-        f"the same case_ids; got {len(a_by_id)} vs {len(b_by_id)} distinct ids"
-    )
+    pairs = _pair_rows_by_case_id(rows_a, rows_b, "latency_summary's median_delta_ci")
     diffs_by_family: dict[str, list[float]] = defaultdict(list)
-    for case_id, row_a in a_by_id.items():
-        row_b = b_by_id[case_id]
+    for row_a, row_b in pairs:
         diffs_by_family[family_of(row_a)].append(row_a.latency_ms - row_b.latency_ms)
     family_ids = list(diffs_by_family)
     n_fam = len(family_ids)
@@ -456,6 +521,10 @@ def _median_delta_ci(
         return None, None, None
     all_diffs = [d for diffs in diffs_by_family.values() for d in diffs]
     delta = statistics.median(all_diffs)
+    if n_resamples <= 0:
+        # Mirrors paired_delta_ci's guard: the point estimate stands, but
+        # there are no resamples to build an interval from.
+        return delta, None, None
     rng = random.Random(seed)
     values: list[float] = []
     for _ in range(n_resamples):
