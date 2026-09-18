@@ -1,0 +1,335 @@
+import json
+from types import SimpleNamespace
+
+import pytest
+
+from cert_nlq.translate.openai_provider import OpenAIProvider
+from cert_nlq.translate.provider import USAGE_TOKEN_KEYS, ProviderError
+
+SCHEMA = {"type": "object", "properties": {"root": {"type": "string"}},
+          "required": ["root"], "additionalProperties": False}
+
+
+#: Fixed token counts so the usage assertions are exact.
+_DEFAULT_USAGE = SimpleNamespace(prompt_tokens=120, completion_tokens=8)
+
+
+class StubCompletions:
+    """Records the call and returns a scripted message."""
+
+    def __init__(self, content=None, refusal=None, raises=None,
+                 usage=_DEFAULT_USAGE, finish_reason="stop", choices=None,
+                 model=None):
+        self._content = content
+        self._refusal = refusal
+        self._raises = raises
+        self._usage = usage
+        self._finish_reason = finish_reason
+        self._choices = choices
+        #: The model named on the completion: the resolved, dated version of
+        #: whatever alias was requested.
+        self._model = model
+        self.kwargs = None
+
+    def create(self, **kwargs):
+        self.kwargs = kwargs
+        if self._raises is not None:
+            raise self._raises
+        message = SimpleNamespace(content=self._content, refusal=self._refusal)
+        choices = self._choices
+        if choices is None:
+            choices = [SimpleNamespace(
+                message=message, finish_reason=self._finish_reason
+            )]
+        completion = SimpleNamespace(choices=choices, usage=self._usage)
+        if self._model is not None:
+            completion.model = self._model
+        return completion
+
+
+def _client(**kwargs):
+    completions = StubCompletions(**kwargs)
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    return client, completions
+
+
+def test_complete_parses_the_json_content():
+    client, _ = _client(content=json.dumps({"root": "widget"}))
+    provider = OpenAIProvider("key", "test-model", client=client)
+    assert provider.complete("sys", "q", SCHEMA, "Route") == {"root": "widget"}
+
+
+def test_complete_requests_a_strict_structured_output():
+    client, completions = _client(content=json.dumps({"root": "widget"}))
+    OpenAIProvider("key", "test-model", client=client).complete(
+        "sys", "q", SCHEMA, "Route"
+    )
+    sent = completions.kwargs
+    fmt = sent["response_format"]
+    assert fmt["type"] == "json_schema"
+    assert fmt["json_schema"]["name"] == "Route"
+    assert fmt["json_schema"]["strict"] is True
+    assert fmt["json_schema"]["schema"] == SCHEMA
+
+
+def test_the_stable_prefix_comes_first():
+    """Automatic prompt caching only helps if the prefix is stable."""
+    client, completions = _client(content=json.dumps({"root": "widget"}))
+    OpenAIProvider("key", "m", client=client).complete("sys", "q", SCHEMA, "R")
+    assert [m["role"] for m in completions.kwargs["messages"]] == ["system", "user"]
+    assert completions.kwargs["messages"][0]["content"] == "sys"
+
+
+def test_output_is_capped():
+    """Payloads are a few hundred tokens; output is the expensive side."""
+    from cert_nlq.translate.openai_provider import (
+        MAX_OUTPUT_TOKENS,
+        OUTPUT_TOKEN_PARAM,
+    )
+
+    client, completions = _client(content=json.dumps({"root": "widget"}))
+    OpenAIProvider("key", "m", client=client).complete("sys", "q", SCHEMA, "R")
+    assert completions.kwargs[OUTPUT_TOKEN_PARAM] == MAX_OUTPUT_TOKENS == 8000
+
+
+def test_stage_one_uses_the_cheaper_router_model():
+    from cert_nlq.translate.router import ROUTE_SCHEMA_NAME
+
+    client, completions = _client(content=json.dumps({"root": "widget"}))
+    provider = OpenAIProvider(
+        "key", "big-model", client=client, router_model="cheap-model"
+    )
+    provider.complete("sys", "q", SCHEMA, ROUTE_SCHEMA_NAME)
+    assert completions.kwargs["model"] == "cheap-model"
+
+
+def test_stage_two_uses_the_translator_model():
+    client, completions = _client(content=json.dumps({"root": "widget"}))
+    provider = OpenAIProvider(
+        "key", "big-model", client=client, router_model="cheap-model"
+    )
+    provider.complete("sys", "q", SCHEMA, "widgetPayload")
+    assert completions.kwargs["model"] == "big-model"
+
+
+def test_without_a_router_model_both_stages_use_one_model():
+    from cert_nlq.translate.router import ROUTE_SCHEMA_NAME
+
+    client, completions = _client(content=json.dumps({"root": "widget"}))
+    provider = OpenAIProvider("key", "only-model", client=client)
+    provider.complete("sys", "q", SCHEMA, ROUTE_SCHEMA_NAME)
+    assert completions.kwargs["model"] == "only-model"
+
+
+def test_usage_is_reported_to_the_callback():
+    """Token accounting is the cost control and the later baseline."""
+    seen = []
+    client, _ = _client(content=json.dumps({"root": "widget"}))
+    provider = OpenAIProvider("key", "m", client=client, on_usage=seen.append)
+    provider.complete("sys", "q", SCHEMA, "Route")
+    assert seen == [{"schema_name": "Route", "model": "m",
+                     "uncached_input_tokens": 120, "cached_input_tokens": 0,
+                     "cache_write_tokens": 0, "output_tokens": 8,
+                     "reasoning_tokens": 0}]
+
+
+def test_the_record_carries_exactly_the_shared_keys():
+    """Both adapters are summed on one set, so one key set, one meaning."""
+    seen = []
+    client, _ = _client(content=json.dumps({"root": "widget"}))
+    OpenAIProvider("key", "m", client=client, on_usage=seen.append).complete(
+        "sys", "q", SCHEMA, "R"
+    )
+    assert set(seen[0]) == {"schema_name", "model", *USAGE_TOKEN_KEYS}
+
+
+def test_a_missing_usage_field_does_not_break_the_call():
+    client, _ = _client(content=json.dumps({"root": "widget"}), usage=None)
+    seen = []
+    provider = OpenAIProvider("key", "m", client=client, on_usage=seen.append)
+    assert provider.complete("sys", "q", SCHEMA, "R") == {"root": "widget"}
+    assert seen == []
+
+
+def test_a_refusal_raises_provider_error():
+    client, _ = _client(content=None, refusal="I can't help with that")
+    with pytest.raises(ProviderError, match="refused"):
+        OpenAIProvider("key", "m", client=client).complete("sys", "q", SCHEMA, "R")
+
+
+def test_unparseable_content_raises_provider_error():
+    client, _ = _client(content="not json at all")
+    with pytest.raises(ProviderError, match="not valid JSON"):
+        OpenAIProvider("key", "m", client=client).complete("sys", "q", SCHEMA, "R")
+
+
+def test_an_upstream_exception_becomes_a_provider_error():
+    client, _ = _client(raises=RuntimeError("connection reset"))
+    with pytest.raises(ProviderError, match="connection reset"):
+        OpenAIProvider("key", "m", client=client).complete("sys", "q", SCHEMA, "R")
+
+
+def test_a_missing_api_key_fails_at_construction():
+    with pytest.raises(ProviderError, match="no API key"):
+        OpenAIProvider("", "m")
+
+
+def test_an_empty_choices_list_stays_inside_the_protocol():
+    """Nothing but ProviderError may leave this module."""
+    client, _ = _client(choices=[])
+    with pytest.raises(ProviderError, match="no choices"):
+        OpenAIProvider("key", "m", client=client).complete("sys", "q", SCHEMA, "R")
+
+
+def test_a_malformed_choice_stays_inside_the_protocol():
+    client, _ = _client(choices=[SimpleNamespace()])
+    with pytest.raises(ProviderError, match="no choices"):
+        OpenAIProvider("key", "m", client=client).complete("sys", "q", SCHEMA, "R")
+
+
+def test_a_raising_usage_callback_does_not_fail_the_call():
+    """The callback is a log handler in production; a broken one is not a 500."""
+    def explode(record):
+        raise RuntimeError("the log handler is misconfigured")
+
+    client, _ = _client(content=json.dumps({"root": "widget"}))
+    provider = OpenAIProvider("key", "m", client=client, on_usage=explode)
+    assert provider.complete("sys", "q", SCHEMA, "R") == {"root": "widget"}
+
+
+def test_a_truncated_response_names_the_cap_not_the_json():
+    """Reporting a cut-off response as bad JSON sends the reader elsewhere."""
+    from cert_nlq.translate.openai_provider import (
+        MAX_OUTPUT_TOKENS,
+        OUTPUT_TOKEN_PARAM,
+    )
+
+    client, _ = _client(content='{"root": "wid', finish_reason="length")
+    with pytest.raises(ProviderError) as caught:
+        OpenAIProvider("key", "m", client=client).complete("sys", "q", SCHEMA, "R")
+    message = str(caught.value)
+    assert str(MAX_OUTPUT_TOKENS) in message
+    assert OUTPUT_TOKEN_PARAM in message
+    assert "JSON" not in message
+
+
+def test_both_cache_counts_are_taken_out_of_the_input_total():
+    """This vendor's prompt total includes both cache counters.
+
+    They are breakdowns of the prompt, not siblings of it, so reporting the
+    raw total against either of them counts those tokens twice. The other
+    vendor reports siblings, so the two adapters only stay addable if the
+    three input keys here partition the prompt total exactly.
+    """
+    usage = SimpleNamespace(
+        prompt_tokens=120,
+        completion_tokens=8,
+        prompt_tokens_details=SimpleNamespace(
+            cached_tokens=64, cache_write_tokens=16
+        ),
+        completion_tokens_details=SimpleNamespace(reasoning_tokens=5),
+    )
+    seen = []
+    client, _ = _client(content=json.dumps({"root": "widget"}), usage=usage)
+    OpenAIProvider("key", "m", client=client, on_usage=seen.append).complete(
+        "sys", "q", SCHEMA, "R"
+    )
+    assert seen[0]["cached_input_tokens"] == 64
+    assert seen[0]["cache_write_tokens"] == 16
+    assert seen[0]["uncached_input_tokens"] == 40
+    # The three-way sum, with a non-zero write count. A two-way assertion
+    # stays true while the write count is double-counted, which is how that
+    # defect survived a test that looked like it covered this.
+    assert (
+        seen[0]["uncached_input_tokens"]
+        + seen[0]["cached_input_tokens"]
+        + seen[0]["cache_write_tokens"]
+        == 120
+    )
+    assert seen[0]["reasoning_tokens"] == 5
+
+
+def test_the_input_count_never_goes_negative():
+    """A breakdown larger than the total it came from must not underflow."""
+    usage = SimpleNamespace(
+        prompt_tokens=10, completion_tokens=8,
+        prompt_tokens_details=SimpleNamespace(cached_tokens=99),
+    )
+    seen = []
+    client, _ = _client(content=json.dumps({"root": "widget"}), usage=usage)
+    OpenAIProvider("key", "m", client=client, on_usage=seen.append).complete(
+        "sys", "q", SCHEMA, "R"
+    )
+    assert seen[0]["uncached_input_tokens"] == 0
+
+
+def test_absent_detail_blocks_do_not_break_the_call():
+    """Both detail objects are optional on the response."""
+    usage = SimpleNamespace(
+        prompt_tokens=120, completion_tokens=8,
+        prompt_tokens_details=None, completion_tokens_details=None,
+    )
+    seen = []
+    client, _ = _client(content=json.dumps({"root": "widget"}), usage=usage)
+    provider = OpenAIProvider("key", "m", client=client, on_usage=seen.append)
+    assert provider.complete("sys", "q", SCHEMA, "R") == {"root": "widget"}
+    assert seen[0]["cached_input_tokens"] == 0
+    assert seen[0]["cache_write_tokens"] == 0
+    assert seen[0]["reasoning_tokens"] == 0
+    assert seen[0]["uncached_input_tokens"] == 120
+
+
+def test_the_format_name_is_sanitised():
+    """The name is built from registry data, which nothing here validates."""
+    client, completions = _client(content=json.dumps({"root": "widget"}))
+    OpenAIProvider("key", "m", client=client).complete(
+        "sys", "q", SCHEMA, "open items (2024)/v2Payload"
+    )
+    assert completions.kwargs["response_format"]["json_schema"]["name"] == (
+        "openitems2024v2Payload"
+    )
+
+
+def test_the_format_name_is_truncated():
+    client, completions = _client(content=json.dumps({"root": "widget"}))
+    OpenAIProvider("key", "m", client=client).complete(
+        "sys", "q", SCHEMA, "a" * 200
+    )
+    assert len(completions.kwargs["response_format"]["json_schema"]["name"]) == 64
+
+
+def test_a_name_with_nothing_usable_still_produces_one():
+    client, completions = _client(content=json.dumps({"root": "widget"}))
+    OpenAIProvider("key", "m", client=client).complete("sys", "q", SCHEMA, "//")
+    name = completions.kwargs["response_format"]["json_schema"]["name"]
+    assert 1 <= len(name) <= 64
+
+
+def test_a_blank_model_fails_at_construction():
+    """The setting defaults to blank, so a key-only deploy must not build."""
+    with pytest.raises(ProviderError, match="no model"):
+        OpenAIProvider("key", "")
+
+
+def test_usage_reports_the_model_that_answered():
+    """An alias resolves to a dated version; the record must carry that one.
+
+    Priced runs are compared across weeks, and the alias silently moves.
+    """
+    seen = []
+    client, _ = _client(
+        content=json.dumps({"root": "widget"}), model="test-model-2026-01-01"
+    )
+    OpenAIProvider("key", "test-model", client=client, on_usage=seen.append).complete(
+        "sys", "q", SCHEMA, "Route"
+    )
+    assert seen[0]["model"] == "test-model-2026-01-01"
+
+
+def test_usage_falls_back_to_the_requested_model():
+    seen = []
+    client, _ = _client(content=json.dumps({"root": "widget"}))
+    OpenAIProvider("key", "test-model", client=client, on_usage=seen.append).complete(
+        "sys", "q", SCHEMA, "Route"
+    )
+    assert seen[0]["model"] == "test-model"

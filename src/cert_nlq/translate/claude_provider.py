@@ -1,0 +1,213 @@
+"""Claude structured-output implementation of the Provider protocol.
+
+Parallel to openai_provider.py — same `complete` signature, same ProviderError
+contract, so nothing above the protocol knows which vendor is in use.
+"""
+import json
+import logging
+
+from .openai_provider import PROVIDER_RETRIES, PROVIDER_TIMEOUT
+from .provider import ProviderError, token_count
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_MODEL = "claude-opus-5"
+
+#: Translation is mechanical, not a reasoning problem, so the default `high`
+#: effort buys nothing. Thinking itself stays on (adaptive is the default on
+#: this model): disabling it can put a tool call into visible text and leak
+#: internal tags, and lowering effort cuts cost without either risk.
+DEFAULT_EFFORT = "medium"
+
+#: Server-side rescue when a safety classifier declines a request. This beta
+#: gates the scalar `fallbacks="default"` form specifically; the older list
+#: form is gated by a different, earlier beta, and crossing the two is
+#: rejected.
+#:
+#: Off by default, deliberately. It is a production availability feature, and
+#: a fallback means a model other than the requested one may answer — which
+#: silently changes what a comparison run is measuring. Opt in for a deploy
+#: that wants the rescue; leave it off for anything being scored.
+FALLBACK_BETA = "server-side-fallback-2026-07-01"
+
+#: Payloads are small; this is headroom, not a target. The SDK refuses a
+#: non-streaming request whose cap implies a run longer than its ten-minute
+#: ceiling, which lands at 21_334 tokens — measured, not guessed. This sits
+#: well under that, and matches the SDK's own non-streaming recommendation,
+#: while leaving adaptive thinking (which spends from this same budget) room
+#: to work rather than being trimmed to just clear the guard.
+#:
+#: Not like-for-like with the other adapter, on purpose: its cap is lower,
+#: because nothing draws reasoning from the same budget there. Whoever reads
+#: a comparison of the two should know the caps differ by design.
+MAX_TOKENS = 16000
+
+#: Caching is opt-in on this platform, where the other vendor's is automatic.
+#: Without it the stable-prefix ordering costs something and buys nothing —
+#: and the stage-1 system prompt is the whole registry description, which is
+#: the largest avoidable cost on this path. The top-level form marks the last
+#: cacheable block for us, so no per-block bookkeeping is needed here.
+CACHE_CONTROL = {"type": "ephemeral"}
+
+
+class ClaudeProvider:
+    def __init__(
+        self,
+        api_key: str,
+        model: str = DEFAULT_MODEL,
+        client=None,
+        effort: str = DEFAULT_EFFORT,
+        use_fallbacks: bool = False,
+        on_usage=None,
+    ) -> None:
+        if client is None and not api_key:
+            raise ProviderError("no API key configured for the Claude provider")
+        # Checked alongside the key, and for the same reason as in the other
+        # adapter: a deploy that blanks the model setting would otherwise
+        # build a provider that fails on every call instead of at boot.
+        if not model:
+            raise ProviderError("no model configured for the Claude provider")
+        self._model = model
+        self._effort = effort
+        self._use_fallbacks = use_fallbacks
+        self._on_usage = on_usage
+        if client is not None:
+            self._client = client
+        else:
+            import anthropic
+
+            # Bounded for the same reason as the OpenAI adapter; see
+            # PROVIDER_TIMEOUT there for the invariant this preserves.
+            self._client = anthropic.Anthropic(
+                api_key=api_key,
+                timeout=PROVIDER_TIMEOUT,
+                max_retries=PROVIDER_RETRIES,
+            )
+
+    def complete(
+        self, system: str, question: str, schema: dict, schema_name: str
+    ) -> dict:
+        # `schema_name` reaches the request nowhere: this vendor's json_schema
+        # format takes no name and no strict flag — conformance is intrinsic.
+        # It is still carried, because the usage record is keyed by stage and
+        # the name is the only stage signal the protocol offers.
+        #
+        # Unlike the other adapter, it does not pick a model either: stage 1
+        # runs on the same model as stage 2 here. Another deliberate
+        # difference between the two, and another thing a comparison of them
+        # is not holding constant.
+        request = {
+            "model": self._model,
+            "max_tokens": MAX_TOKENS,
+            "system": system,
+            "messages": [{"role": "user", "content": question}],
+            "output_config": {
+                "effort": self._effort,
+                "format": {"type": "json_schema", "schema": schema},
+            },
+            "cache_control": CACHE_CONTROL,
+        }
+        if self._use_fallbacks:
+            endpoint = self._client.beta.messages
+            request["betas"] = [FALLBACK_BETA]
+            request["fallbacks"] = "default"
+        else:
+            endpoint = self._client.messages
+
+        try:
+            response = endpoint.create(**request)
+        except Exception as exc:
+            raise ProviderError(str(exc)) from exc
+
+        self._report_usage(response, schema_name)
+
+        # Everything below is read defensively. This module's one contract is
+        # that nothing but ProviderError leaves it, and the HTTP layer above
+        # catches only that — so an AttributeError or a TypeError on a
+        # half-formed response object would escape as a bare 500 with no
+        # indication of which field was missing.
+        stop_reason = getattr(response, "stop_reason", None)
+        if stop_reason is None:
+            # Non-streaming responses always carry one, so its absence means
+            # the object is not the shape this adapter was written against.
+            raise ProviderError("response carried no stop_reason")
+        if stop_reason == "max_tokens":
+            # Checked before the text is parsed: a truncated payload is not
+            # valid JSON either, and saying so sends the reader hunting for a
+            # malformed model instead of a cap to raise.
+            raise ProviderError(
+                f"output stopped at the {MAX_TOKENS}-token cap (max_tokens); "
+                "raise the cap or narrow the request"
+            )
+        if stop_reason == "model_context_window_exceeded":
+            # The other end of the same problem, and checked here for the
+            # same reason: left alone it falls through to the missing-text
+            # branch, which blames the model for a response that was never
+            # produced. Worded so it cannot be read as the cap above — the
+            # input did not fit, and allowing more output does not help.
+            raise ProviderError(
+                "the input exceeded the model's context window "
+                "(model_context_window_exceeded); send a smaller request"
+            )
+        if stop_reason == "refusal":
+            # `stop_details` is populated only for this stop reason, and is
+            # None for every other one — so it is read only inside this branch.
+            details = getattr(response, "stop_details", None)
+            category = getattr(details, "category", None)
+            raise ProviderError(f"model refused: {category or 'unspecified'}")
+
+        blocks = getattr(response, "content", None)
+        if not isinstance(blocks, (list, tuple)):
+            raise ProviderError("response carried no content blocks")
+        # Adaptive thinking is on by default, so a thinking block may lead.
+        text = next(
+            (getattr(b, "text", None) for b in blocks
+             if getattr(b, "type", None) == "text"),
+            None,
+        )
+        if not isinstance(text, str):
+            raise ProviderError("no text block in the response")
+        try:
+            return json.loads(text)
+        except (TypeError, ValueError) as exc:
+            raise ProviderError("model output was not valid JSON") from exc
+
+    def _report_usage(self, response, schema_name: str) -> None:
+        """Hand token counts to the caller. Never fail the call over this.
+
+        The keys are the shared, non-overlapping set — see USAGE_TOKEN_KEYS.
+        This vendor already reports that form: `input_tokens` excludes both
+        cache counters, which sit beside it rather than inside it. The other
+        vendor's input total includes its cached reads and is adjusted there.
+        That is what makes a single key summable across a golden set answered
+        by both adapters.
+
+        `model` is read off the response, not off the request. With fallbacks
+        enabled a different model can answer, and recording the one that was
+        asked for would attribute its tokens and its answer quality to a model
+        that never ran — undetectably, after the fact.
+        """
+        if self._on_usage is None:
+            return
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return
+        output_detail = getattr(usage, "output_tokens_details", None)
+        record = {
+            "schema_name": schema_name,
+            "model": getattr(response, "model", None) or self._model,
+            "uncached_input_tokens": token_count(usage, "input_tokens"),
+            "cached_input_tokens": token_count(usage, "cache_read_input_tokens"),
+            "cache_write_tokens": token_count(
+                usage, "cache_creation_input_tokens"
+            ),
+            "output_tokens": token_count(usage, "output_tokens"),
+            "reasoning_tokens": token_count(output_detail, "thinking_tokens"),
+        }
+        try:
+            self._on_usage(record)
+        except Exception:
+            # The callback is a logging call in production. A misconfigured
+            # handler must not turn a translation that already succeeded
+            # into a failure.
+            logger.exception("usage callback failed")

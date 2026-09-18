@@ -1,0 +1,313 @@
+{
+  "version": "sha256:fixture-v1",
+  "roots": [
+    {
+      "root": "widget",
+      "label": "Widgets",
+      "key": [
+        "widget.region",
+        "widget.serial",
+        "widget.year"
+      ],
+      "groups": [
+        {
+          "name": "Location & Identity",
+          "identity": true,
+          "description": "Which widget this is: region, serial number, year."
+        },
+        {
+          "name": "Lifecycle",
+          "description": "Whether a widget is in service, retired, certified."
+        },
+        {
+          "name": "Commercial",
+          "description": "Price, shipping dates and shipment amounts."
+        }
+      ],
+      "fields": [
+        {
+          "key": "widget.region",
+          "table": "widget",
+          "column": "region",
+          "label": "Region",
+          "type": "text",
+          "group": "Location & Identity",
+          "operators": [
+            "=",
+            "iequals",
+            "!=",
+            "in",
+            "contains",
+            "starts_with",
+            "is_blank",
+            "is_not_blank"
+          ],
+          "vocabulary": [
+            {
+              "code": "N",
+              "meaning": "North",
+              "synonyms": [
+                "northern",
+                "up north"
+              ]
+            },
+            {
+              "code": "S",
+              "meaning": "South",
+              "synonyms": [
+                "southern"
+              ]
+            }
+          ]
+        },
+        {
+          "key": "widget.serial",
+          "table": "widget",
+          "column": "serial",
+          "label": "Serial",
+          "type": "number",
+          "group": "Location & Identity",
+          "operators": [
+            "=",
+            "!=",
+            ">",
+            "<",
+            ">=",
+            "<=",
+            "between",
+            "is_blank",
+            "is_not_blank"
+          ],
+          "vocabulary": []
+        },
+        {
+          "key": "widget.year",
+          "table": "widget",
+          "column": "year",
+          "label": "Year",
+          "type": "year",
+          "group": "Location & Identity",
+          "operators": [
+            "=",
+            "!=",
+            ">",
+            "<",
+            ">=",
+            "<=",
+            "between",
+            "is_blank",
+            "is_not_blank"
+          ],
+          "vocabulary": []
+        },
+        {
+          "key": "widget.status",
+          "table": "widget",
+          "column": "status",
+          "label": "Status",
+          "type": "text",
+          "group": "Lifecycle",
+          "operators": [
+            "=",
+            "!=",
+            "in",
+            "contains",
+            "starts_with",
+            "is_blank",
+            "is_not_blank"
+          ],
+          "vocabulary": [
+            {
+              "code": "A",
+              "meaning": "Active",
+              "synonyms": [
+                "live",
+                "in service"
+              ]
+            },
+            {
+              "code": "X",
+              "meaning": "Retired",
+              "synonyms": [
+                "decommissioned",
+                "dead"
+              ]
+            }
+          ]
+        },
+        {
+          "key": "widget.price",
+          "table": "widget",
+          "column": "price",
+          "label": "Price",
+          "type": "money",
+          "group": "Commercial",
+          "operators": [
+            "=",
+            "!=",
+            ">",
+            "<",
+            ">=",
+            "<=",
+            "between",
+            "is_blank",
+            "is_not_blank"
+          ],
+          "vocabulary": []
+        },
+        {
+          "key": "widget.shipped",
+          "table": "widget",
+          "column": "shipped",
+          "label": "Shipped On",
+          "type": "date",
+          "group": "Commercial",
+          "operators": [
+            "=",
+            "!=",
+            ">",
+            "<",
+            "between",
+            "is_blank",
+            "is_not_blank"
+          ],
+          "vocabulary": []
+        },
+        {
+          "key": "widget.certified",
+          "table": "widget",
+          "column": "certified",
+          "label": "Certified",
+          "type": "bool",
+          "group": "Lifecycle",
+          "operators": [
+            "is_true",
+            "is_false"
+          ],
+          "vocabulary": []
+        },
+        {
+          "key": "shipment.amount",
+          "table": "shipment",
+          "column": "amount",
+          "label": "Shipment Amount",
+          "type": "money",
+          "group": "Commercial",
+          "operators": [
+            "=",
+            "!=",
+            ">",
+            "<",
+            ">=",
+            "<=",
+            "between",
+            "is_blank",
+            "is_not_blank"
+          ],
+          "vocabulary": []
+        },
+        {
+          "key": "widget.warranty",
+          "table": "widget_extra",
+          "column": "warranty",
+          "label": "Warranty",
+          "type": "text",
+          "group": "Aftercare",
+          "operators": [
+            "=",
+            "!=",
+            "is_blank",
+            "is_not_blank"
+          ],
+          "vocabulary": []
+        }
+      ],
+      "joins": [
+        {
+          "table": "shipment",
+          "label": "Shipments",
+          "cardinality": "one-to-many",
+          "on": [
+            [
+              "region",
+              "region"
+            ],
+            [
+              "serial",
+              "serial"
+            ],
+            [
+              "year",
+              "shipyear"
+            ]
+          ]
+        },
+        {
+          "table": "vendor",
+          "label": "Vendor",
+          "cardinality": "many-to-one",
+          "on": [
+            [
+              "vendorid",
+              "vendorid"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "root": "vendor",
+      "label": "Vendors",
+      "key": [
+        "vendor.vendorid"
+      ],
+      "groups": [
+        {
+          "name": "Location & Identity",
+          "identity": true,
+          "description": "Which vendor this is: id and name."
+        }
+      ],
+      "fields": [
+        {
+          "key": "vendor.vendorid",
+          "table": "vendor",
+          "column": "vendorid",
+          "label": "Vendor ID",
+          "type": "number",
+          "group": "Location & Identity",
+          "operators": [
+            "=",
+            "!=",
+            ">",
+            "<",
+            ">=",
+            "<=",
+            "between",
+            "is_blank",
+            "is_not_blank"
+          ],
+          "vocabulary": []
+        },
+        {
+          "key": "vendor.name",
+          "table": "vendor",
+          "column": "name",
+          "label": "Vendor Name",
+          "type": "text",
+          "group": "Location & Identity",
+          "operators": [
+            "=",
+            "!=",
+            "contains",
+            "starts_with",
+            "is_blank",
+            "is_not_blank"
+          ],
+          "vocabulary": []
+        }
+      ],
+      "joins": []
+    }
+  ]
+}
