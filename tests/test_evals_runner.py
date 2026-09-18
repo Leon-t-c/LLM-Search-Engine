@@ -12,7 +12,12 @@ from pathlib import Path
 import httpx
 
 from cert_nlq.evals.golden import GoldenCase
-from cert_nlq.evals.runner import canonical_only, run_benchmark, stratified_sample
+from cert_nlq.evals.runner import (
+    canonical_only,
+    limit_to_family_boundary,
+    run_benchmark,
+    stratified_sample,
+)
 
 # --------------------------------------------------------------------------
 # helpers
@@ -454,6 +459,54 @@ def test_canonical_only_filters_out_paraphrases():
     paraphrase = _ok_case("c0-p1", _simple_filter_payload(), paraphrase_of="c0")
     result = canonical_only([canonical, paraphrase])
     assert [c.id for c in result] == ["c0"]
+
+
+# --------------------------------------------------------------------------
+# limit_to_family_boundary(): --limit truncates whole families, never mid-family
+# --------------------------------------------------------------------------
+
+
+def test_limit_mid_family_rounds_down_to_the_family_boundary():
+    """A limit landing inside a family's span drops that whole family --
+    it must never enter the run with only some of its members.
+    """
+    c1 = _ok_case("c1", _simple_filter_payload())
+    c1_p1 = _ok_case("c1-p1", _simple_filter_payload(), paraphrase_of="c1")
+    c2 = _ok_case("c2", _simple_filter_payload())
+    cases = [c1, c1_p1, c2]  # family "c1" has 2 members, family "c2" has 1
+
+    # limit=1 lands mid-way through the 2-member "c1" family (would need to
+    # cut it to 1 of 2) -- the whole family must be dropped, not truncated
+    # to a lone c1.
+    result = limit_to_family_boundary(cases, 1)
+    assert [c.id for c in result] == []
+
+
+def test_limit_on_a_family_boundary_keeps_the_family_whole():
+    c1 = _ok_case("c1", _simple_filter_payload())
+    c1_p1 = _ok_case("c1-p1", _simple_filter_payload(), paraphrase_of="c1")
+    c2 = _ok_case("c2", _simple_filter_payload())
+    cases = [c1, c1_p1, c2]
+
+    assert [c.id for c in limit_to_family_boundary(cases, 3)] == ["c1", "c1-p1", "c2"]
+    # limit=2 exactly matches the first family's own size, but the second
+    # family ("c2") does not fit inside that budget at all -- so far this
+    # is identical to the mid-family case, confirmed separately above; here
+    # the point is a limit exactly matching a *lone* family's size does
+    # include it whole.
+    assert [c.id for c in limit_to_family_boundary([c1, c1_p1], 2)] == ["c1", "c1-p1"]
+
+
+def test_limit_to_family_boundary_of_zero_or_negative_returns_nothing():
+    cases = [_ok_case("c1", _simple_filter_payload())]
+    assert limit_to_family_boundary(cases, 0) == []
+    assert limit_to_family_boundary(cases, -1) == []
+
+
+def test_limit_to_family_boundary_never_exceeds_available_cases():
+    cases = [_ok_case(f"c{i}", _simple_filter_payload()) for i in range(3)]
+    result = limit_to_family_boundary(cases, 100)
+    assert [c.id for c in result] == ["c0", "c1", "c2"]
 
 
 # --------------------------------------------------------------------------

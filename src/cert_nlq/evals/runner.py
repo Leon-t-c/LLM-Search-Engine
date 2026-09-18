@@ -193,7 +193,7 @@ async def run_benchmark(
 
 
 # --------------------------------------------------------------------------
-# sampling: --canonical-only and --stratify
+# sampling: --canonical-only, --stratify, and --limit
 # --------------------------------------------------------------------------
 
 
@@ -202,6 +202,47 @@ def canonical_only(cases: Sequence[GoldenCase]) -> list[GoldenCase]:
     test itself runs over (`stats.py`'s module docstring), and `--canonical-
     only`'s own filter."""
     return [c for c in cases if c.paraphrase_of is None]
+
+
+def limit_to_family_boundary(cases: Sequence[GoldenCase], limit: int) -> list[GoldenCase]:
+    """`--limit` alone (never combined with `--stratify` -- the CLI makes
+    them mutually exclusive): at most `limit` cases, dropping whole
+    families from the tail rather than splitting one.
+
+    A plain `cases[:limit]` would cut a family in half whenever the limit
+    landed mid-family -- exactly the case `--stratify` keeps whole, so
+    `--limit` truncating differently would make `family_accuracy`/
+    `family_consistency` see a canonical case with some but not all of its
+    confirmed paraphrases, no different from an errored member silently
+    incomplete (2026-09-18 review, item 4's own concern). Families are
+    walked in the order their first member appears in `cases`; a family is
+    kept in full once the running total does not exceed `limit`, and
+    dropped (along with every family after it) the moment adding it would.
+
+    `limit <= 0` returns `[]` -- the CLI's own `_validate_sample_args`
+    already rejects that before this is ever called, so this is a second,
+    cheap guarantee rather than the only one.
+    """
+    if limit <= 0:
+        return []
+    family_order: list[str] = []
+    family_members: dict[str, list[GoldenCase]] = {}
+    for case in cases:
+        fid = family(case)
+        if fid not in family_members:
+            family_members[fid] = []
+            family_order.append(fid)
+        family_members[fid].append(case)
+
+    result: list[GoldenCase] = []
+    running = 0
+    for fid in family_order:
+        members = family_members[fid]
+        if running + len(members) > limit:
+            break
+        result.extend(members)
+        running += len(members)
+    return result
 
 
 def stratified_sample(

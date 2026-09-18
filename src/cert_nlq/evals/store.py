@@ -62,7 +62,21 @@ from .scoring import Row
 #: with a separator a source file cannot itself contain unescaped (a null
 #: byte), so no concatenation of two different splits of the same total
 #: text can collide onto the same hash.
-_HASHED_MODULES = ("aggregate", "golden", "scoring", "stats")
+#:
+#: `runner.py` is included: its status-translation map (wire status ->
+#: scoring vocabulary) and its usage/route extraction decide what an
+#: answer *is* before `scoring.score` ever sees it -- two commits differing
+#: only there would otherwise compare as identical evaluator identity while
+#: actually measuring something different.
+#:
+#: `report.py` stays **excluded**, deliberately: it only renders rows that
+#: are already scored by the modules above, never decides what any of them
+#: mean. Two runs recorded under different `report.py` code (a prettier
+#: table, say) were scored identically and must keep comparing as
+#: identical evaluator identity -- hashing `report.py` in would make a pure
+#: rendering change look like a new evaluator, the false positive this
+#: hash exists to avoid, not manufacture.
+_HASHED_MODULES = ("aggregate", "golden", "runner", "scoring", "stats")
 _HASH_SEPARATOR = "\0"
 
 #: `Row` fields whose stored column is JSON (tuples) rather than the
@@ -76,7 +90,9 @@ _ROW_TUPLE_FIELDS = frozenset({
 
 def evals_code_hash() -> str:
     """sha256 over the source text of `scoring.py + aggregate.py + stats.py
-    + golden.py`, in that fixed sorted order.
+    + golden.py + runner.py`, in that fixed sorted order (see
+    `_HASHED_MODULES` for why `runner.py` is in this list and `report.py`
+    is not).
 
     This is a hash of *what the evaluator does*, computed at run time, so a
     change to any of the four modules -- including one that should have
@@ -197,9 +213,16 @@ class RunRecord(Base):
     #: The non-secret dict from `/healthz` plus the model ids actually
     #: observed in the usage records -- ground truth over configuration.
     model_config_json: Mapped[dict[str, Any]] = mapped_column("model_config", JSON)
-    #: The stats seed (`stats.py`'s bootstrap/permutation seed), when this
-    #: run's report drew one. `None` for a run that has not yet been
-    #: through the stats layer.
+    #: The **sampling** seed -- `--stratify`'s own seed, recorded as-is at
+    #: run time (Task 6's `__main__.py`). Corrected comment (2026-09-18
+    #: review): this column was originally documented as `stats.py`'s
+    #: bootstrap/permutation seed, but nothing ever wrote that value here --
+    #: a comparison's bootstrap seed is chosen at `--compare` time, is not
+    #: known when either run was recorded, and belongs to the *pair*, not
+    #: to either run alone. It is printed in the compare report itself and,
+    #: for a durable record on each run, appended to `notes` via
+    #: `Store.append_note` as `bootstrap_seed=<n>` once a comparison uses
+    #: that run. `None` for a run that did not use `--stratify`.
     seed: Mapped[int | None] = mapped_column(default=None)
     #: The `--stratify` sample size, when this run replayed a stratified
     #: subset of the golden set rather than all of it. `None` means "the
@@ -387,6 +410,28 @@ class Store:
             for record in records:
                 session.expunge(record)
             return list(records)
+
+    def append_note(self, run_id: str, text: str) -> None:
+        """Append `text` to a run's `notes`, space-separated, without a
+        schema change.
+
+        The seam this exists for (2026-09-18 review): `--compare`'s
+        bootstrap seed is chosen at comparison time, after both runs are
+        already recorded, and belongs to the *pair* being compared, not to
+        either run's own identity (`seed`'s column comment). The compare
+        report prints it; this is how a durable trace of it also lands on
+        each run's own record, as `bootstrap_seed=<n>`, without adding a
+        column whose meaning would only ever apply to some runs.
+
+        Creates `notes` from blank rather than leaving a leading space.
+        Raises `KeyError` for an unknown `run_id`, same as `load_run`.
+        """
+        with Session(self._engine) as session:
+            run = session.get(RunRecord, run_id)
+            if run is None:
+                raise KeyError(f"no run recorded with id {run_id!r}")
+            run.notes = f"{run.notes} {text}" if run.notes else text
+            session.commit()
 
 
 def _enable_sqlite_foreign_keys(dbapi_connection, connection_record) -> None:

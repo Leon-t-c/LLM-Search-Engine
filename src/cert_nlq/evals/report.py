@@ -47,6 +47,7 @@ from .stats import (
     latency_summary,
     mcnemar_exact,
     paired_delta_ci,
+    wilson,
 )
 
 # --------------------------------------------------------------------------
@@ -111,14 +112,21 @@ def estimate_cost_per_query(
     provider: str, model_id: str, tokens_in: float, tokens_out: float
 ) -> float | None:
     """USD per query from *measured* average token totals (a run's own
-    `tokens_per_query`), or `None` when the run's cost is not tokens at all.
+    `tokens_per_query`), or `None` only for `"ollama"`, whose cost is
+    hardware amortisation, not a per-token bill (spec §15's phase-2 line) --
+    there is no dollar figure to compute for it at all.
 
-    A self-hosted provider's cost is hardware amortisation, not a per-token
-    bill (spec §15's phase-2 line) -- there is no dollar figure to compute
-    here, and the trade-off table prints that fact rather than a fabricated
-    $0.00.
+    **Every other provider gets an estimate here**, including one with no
+    entry in `PRICE_PER_1M_TOKENS` (silently priced off `"default"`) --
+    2026-09-18 review: this function used to return `None` for "anything
+    but openai", which mislabelled a billed non-openai provider (Claude,
+    say) as hardware-amortised, exactly as wrong the other way. Whether
+    *this* estimate is trustworthy (real rate on file, or the placeholder)
+    is `_cost_cell`'s job to say -- via `has_pricing_for` -- not this
+    function's; it only ever refuses to price the one provider that
+    genuinely has no token bill.
     """
-    if provider != "openai":
+    if provider == "ollama":
         return None
     price = _price_for(model_id)
     return tokens_in / 1_000_000 * price["input"] + tokens_out / 1_000_000 * price["output"]
@@ -152,19 +160,34 @@ def _fmt_ci(lo: float | None, hi: float | None) -> str:
 
 
 def _cost_cell(run: Any, tokens_block: dict[str, Any]) -> str:
-    """The trade-off table's "cost per query" cell for one run: a dollar
-    estimate from measured token totals, or the honest "n/a" -- a
-    self-hosted run has no per-token bill, and a run with zero scoreable
-    rows has no measured tokens to price."""
+    """The trade-off table's "cost per query" cell for one run.
+
+    Three distinct outcomes (2026-09-18 review -- the old version rendered
+    every non-openai provider as "hardware-amortised", which is only true
+    of `"ollama"`; a billed provider like Claude with no rate on file was
+    silently given the *wrong* excuse):
+
+    * `"ollama"` -- genuinely hardware-amortised, no token bill at all.
+    * any other provider with no entry in `PRICE_PER_1M_TOKENS` -- "no rate
+      on file for `<model>`", the same honest refusal `has_pricing_for`
+      backs in the CLI's pre-run spend gate, rather than a dollar figure
+      quietly built on a rate for a different model.
+    * everything else (openai, or another provider with its own priced
+      entry) -- the estimate.
+    """
+    if run.provider == "ollama":
+        return "n/a (hardware-amortised)"
     tokens_in = tokens_block.get("tokens_in")
     tokens_out = tokens_block.get("tokens_out")
     if tokens_in is None:
         return "n/a (unmeasured)"
+    if run.provider != "openai" and not has_pricing_for(run.model_id):
+        return f"no rate on file for {run.model_id}"
     cost = estimate_cost_per_query(
         run.provider, run.model_id, tokens_in["value"],
         tokens_out["value"] if tokens_out is not None else 0,
     )
-    return f"${cost:.4f}" if cost is not None else "n/a (hardware-amortised)"
+    return f"${cost:.4f}"
 
 
 def _table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
@@ -177,9 +200,87 @@ def _table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
     return "\n".join(lines)
 
 
-def _block_rows(block: Metrics) -> list[tuple[str, str]]:
+#: The four headline rate-shaped metrics Wilson gets wired onto in the
+#: single-run report (2026-09-18 review, closing the "Wilson is a dead
+#: seam" finding -- the plan promises Wilson on canonical-set rates and
+#: nothing in `src/` called it). Not every rate in the block: Wilson
+#: assumes independent Bernoulli trials (`stats.wilson`'s own docstring),
+#: which holds for a per-question accuracy count but is already a looser
+#: fit for a micro-averaged ratio like field P/R -- extending it further,
+#: to join P/R or operator accuracy, would stretch that assumption thinner
+#: still for no request behind it. These four are exactly what the brief
+#: names: "e2e rate, exact-match rate, field P/R".
+_WILSON_KEYS = ("e2e_correct_rate", "exact_match_rate", "field_precision", "field_recall")
+
+
+def _canonical_wilson_counts(
+    rows: Sequence[Row], canonical_ids: set[str]
+) -> dict[str, tuple[int, int]]:
+    """`(successes, n)` for each of `_WILSON_KEYS`, computed directly from
+    already error-excluded **canonical** rows -- exact integer counts, not
+    a float round-trip through an aggregated ratio, and restricted to the
+    canonical subset because Wilson's independence assumption does not
+    survive paraphrase families (`stats.py`'s own module docstring: "on the
+    paraphrase-expanded set... use cluster_bootstrap instead").
+
+    Mirrors `aggregate.py`'s own `_rate_over`/`_bool_rate`/`_field_pr`
+    denominators exactly, recomputed here rather than imported: those are
+    private to that module, and re-deriving four counts from a row list is
+    cheaper than widening its API for one caller.
+    """
+    canonical_rows = [r for r in rows if r.case_id in canonical_ids and r.error is None]
+
+    e2e_n = len(canonical_rows)
+    e2e_successes = sum(1 for r in canonical_rows if r.e2e_correct)
+
+    exact_present = [r for r in canonical_rows if r.exact_match is not None]
+    exact_n = len(exact_present)
+    exact_successes = sum(1 for r in exact_present if r.exact_match)
+
+    measured = [
+        r for r in canonical_rows if r.root_correct is True and r.field_tp is not None
+    ]
+    field_tp = sum(r.field_tp for r in measured)
+    field_fp = sum(r.field_fp for r in measured)
+    field_fn = sum(r.field_fn for r in measured)
+
+    return {
+        "e2e_correct_rate": (e2e_successes, e2e_n),
+        "exact_match_rate": (exact_successes, exact_n),
+        "field_precision": (field_tp, field_tp + field_fp),
+        "field_recall": (field_tp, field_tp + field_fn),
+    }
+
+
+def _wilson_annotation(counts: dict[str, tuple[int, int]], key: str) -> str:
+    successes, n = counts[key]
+    if n == 0:
+        return ""
+    lo, hi = wilson(successes, n)
+    return f" -- canonical Wilson 95% CI (n={n}): {_fmt_ci(lo, hi)}"
+
+
+def _block_rows(
+    block: Metrics, *, wilson_counts: dict[str, tuple[int, int]] | None = None
+) -> list[tuple[str, str]]:
     """The §11 block's headline rows, label -> formatted cell, in §11's own
-    order. Shared by the single-run report and the explanatory cascade."""
+    order. Shared by the single-run report and the explanatory cascade.
+
+    `wilson_counts` (from `_canonical_wilson_counts`) is `None` for the
+    compare report's explanatory cascade -- descriptive only, by that
+    section's own discipline -- and supplied only by `render_single_run`,
+    which is also the only caller that adds a Wilson annotation to
+    `_WILSON_KEYS`' cells. The displayed value/n themselves are always the
+    full-set numbers already on `block`; the annotation is an addition, not
+    a replacement.
+    """
+
+    def cell(key: str, metric) -> str:
+        text = _fmt(metric)
+        if wilson_counts is not None and key in _WILSON_KEYS:
+            text += _wilson_annotation(wilson_counts, key)
+        return text
+
     clar = block["clarification"]
     tokens = block["tokens_per_query"]
     rows = [
@@ -188,11 +289,11 @@ def _block_rows(block: Metrics) -> list[tuple[str, str]]:
         ("Join recall", _fmt(block["join_recall"])),
         ("Groups recall (echoed)", _fmt(block["groups_recall_echoed"])),
         ("Groups recall (proxy)", _fmt(block["groups_recall_proxy"])),
-        ("Field precision (headline)", _fmt(block["field_precision"])),
-        ("Field recall (headline)", _fmt(block["field_recall"])),
+        ("Field precision (headline)", cell("field_precision", block["field_precision"])),
+        ("Field recall (headline)", cell("field_recall", block["field_recall"])),
         ("Operator accuracy", _fmt(block["operator_accuracy"])),
-        ("Exact-match rate", _fmt(block["exact_match_rate"])),
-        ("**E2E-correct rate (primary)**", _fmt(block["e2e_correct_rate"])),
+        ("Exact-match rate", cell("exact_match_rate", block["exact_match_rate"])),
+        ("**E2E-correct rate (primary)**", cell("e2e_correct_rate", block["e2e_correct_rate"])),
         ("Clarification rate", _fmt(clar["clarification_rate"])),
         ("Resolution rate", _fmt(clar["resolution_rate"])),
         ("Candidate recall", _fmt(clar["candidate_recall"])),
@@ -260,6 +361,8 @@ def render_single_run(
     tests without a live store.
     """
     metrics = aggregate(rows, cases, registry)
+    canonical_ids = {c.id for c in cases if c.paraphrase_of is None}
+    wilson_counts = _canonical_wilson_counts(rows, canonical_ids)
     lines = [
         f"# Eval run `{run.id}`",
         "",
@@ -280,8 +383,12 @@ def render_single_run(
     lines += ["", _errors_line(metrics), ""]
 
     lines.append("## §11 metric block")
+    lines.append(
+        "_e2e/exact-match/field P&R rows also carry a Wilson 95% interval over the "
+        "canonical subset (independent-Bernoulli only -- see stats.py)._"
+    )
     lines.append("")
-    lines.append(_table(("Metric", "Value"), _block_rows(metrics)))
+    lines.append(_table(("Metric", "Value"), _block_rows(metrics, wilson_counts=wilson_counts)))
     lines.append("")
     lines.append("### Refusal precision / recall, by reason")
     lines.append("")
@@ -400,9 +507,11 @@ def render_compare(
         f"# Compare `{run_a.id}` (A) vs `{run_b.id}` (B)",
         "",
         f"- A: {run_a.provider} / {run_a.model_id}, concurrency {run_a.concurrency}, "
-        f"error rows: {errors_a} of {len(rows_a)}",
+        f"error rows: {errors_a} of {len(rows_a)}, "
+        f"canonical_only={run_a.canonical_only}, stratify={run_a.stratify}",
         f"- B: {run_b.provider} / {run_b.model_id}, concurrency {run_b.concurrency}, "
-        f"error rows: {errors_b} of {len(rows_b)}",
+        f"error rows: {errors_b} of {len(rows_b)}, "
+        f"canonical_only={run_b.canonical_only}, stratify={run_b.stratify}",
         f"- Shared, error-free cases: {len(shared_ids)} "
         f"(canonical: {len(shared_canonical_ids)})",
         f"- Bootstrap/permutation seed: {seed}",
@@ -435,10 +544,35 @@ def render_compare(
     if shared_ids:
         boot_a = cluster_bootstrap(expanded_a, _e2e_rate, family_of, seed=seed)
         boot_b = cluster_bootstrap(expanded_b, _e2e_rate, family_of, seed=seed)
-        fam_acc_a = family_accuracy(expanded_a, family_of)
-        fam_acc_b = family_accuracy(expanded_b, family_of)
-        fam_con_a = family_consistency(expanded_a, family_of)
-        fam_con_b = family_consistency(expanded_b, family_of)
+
+        # A family with ANY errored member, in EITHER run, is excluded
+        # whole from family_accuracy/family_consistency (2026-09-18
+        # review): those two functions score "every member correct" and
+        # "matches the canonical" respectively, and a member missing
+        # because it errored -- not because it was never sampled -- would
+        # otherwise let the *surviving* members stand in for the whole
+        # family (`all(p.e2e_correct for p in [])` is `True`), scoring a
+        # family "all correct" or "fully consistent" when one member's
+        # real correctness is simply unknown. Read off the *unfiltered*
+        # rows_a/rows_b -- an error on a case neither run's sampling even
+        # shares is still a reason to distrust that family's completeness.
+        errored_case_ids = (
+            {r.case_id for r in rows_a if r.error is not None}
+            | {r.case_id for r in rows_b if r.error is not None}
+        )
+        compromised_families = {family_map.get(cid, cid) for cid in errored_case_ids}
+        family_ids_present = (
+            {family_of(r) for r in expanded_a} | {family_of(r) for r in expanded_b}
+        )
+        errored_member_families = compromised_families & family_ids_present
+
+        family_metric_a = [r for r in expanded_a if family_of(r) not in compromised_families]
+        family_metric_b = [r for r in expanded_b if family_of(r) not in compromised_families]
+
+        fam_acc_a = family_accuracy(family_metric_a, family_of)
+        fam_acc_b = family_accuracy(family_metric_b, family_of)
+        fam_con_a = family_consistency(family_metric_a, family_of)
+        fam_con_b = family_consistency(family_metric_b, family_of)
         rate_a, rate_b = _e2e_rate(expanded_a), _e2e_rate(expanded_b)
         lines.append(_table(
             ("", "A", "B"),
@@ -459,6 +593,10 @@ def render_compare(
                  if fam_con_b["rate"] is not None else "n/a"),
             ],
         ))
+        lines.append(
+            f"_skipped families -- canonical absent: A={fam_acc_a['skipped']} "
+            f"B={fam_acc_b['skipped']}; errored member: {len(errored_member_families)}_"
+        )
     else:
         lines.append("_No shared cases between these two runs._")
 

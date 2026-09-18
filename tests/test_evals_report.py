@@ -322,3 +322,151 @@ def test_estimate_cost_per_query_positive_for_openai():
     cost = estimate_cost_per_query("openai", "gpt-5", 3700, 300)
     assert cost is not None
     assert cost > 0
+
+
+
+def test_estimate_cost_per_query_positive_for_a_non_openai_non_ollama_provider():
+    """A billed provider other than openai (Claude, say) must not be
+    treated as hardware-amortised -- only ollama gets None."""
+    cost = estimate_cost_per_query("claude", "claude-opus-5", 3700, 300)
+    assert cost is not None
+    assert cost > 0
+
+
+# --------------------------------------------------------------------------
+# _cost_cell (via the trade-off table): per-provider labelling
+# --------------------------------------------------------------------------
+
+
+def test_trade_off_table_labels_ollama_as_hardware_amortised(registry):
+    cases = [_ok_case("c1")]
+    rows_a = [_row("c1", True, tokens_in=1000, tokens_out=100)]
+    rows_b = [_row("c1", True, tokens_in=1000, tokens_out=100)]
+    run_a = _run_identity(id="run-a", provider="ollama", model_id="qwen3:4b")
+    run_b = _run_identity(id="run-b", provider="ollama", model_id="qwen3:4b")
+
+    text = render_compare(run_a, rows_a, run_b, rows_b, cases, registry, seed=1)
+
+    assert "hardware-amortised" in text
+    assert "no rate on file" not in text
+
+
+def test_trade_off_table_flags_a_billed_provider_with_no_rate_on_file(registry):
+    cases = [_ok_case("c1")]
+    rows_a = [_row("c1", True, tokens_in=1000, tokens_out=100)]
+    rows_b = [_row("c1", True, tokens_in=1000, tokens_out=100)]
+    run_a = _run_identity(id="run-a", provider="claude", model_id="claude-opus-5")
+    run_b = _run_identity(id="run-b", provider="openai", model_id="gpt-5")
+
+    text = render_compare(run_a, rows_a, run_b, rows_b, cases, registry, seed=1)
+
+    assert "no rate on file for claude-opus-5" in text
+    assert "hardware-amortised" not in text
+
+
+def test_trade_off_table_prices_openai(registry):
+    cases = [_ok_case("c1")]
+    rows_a = [_row("c1", True, tokens_in=1000, tokens_out=100)]
+    rows_b = [_row("c1", True, tokens_in=1000, tokens_out=100)]
+    run_a = _run_identity(id="run-a", provider="openai", model_id="gpt-5")
+    run_b = _run_identity(id="run-b", provider="openai", model_id="gpt-5")
+
+    text = render_compare(run_a, rows_a, run_b, rows_b, cases, registry, seed=1)
+
+    assert re.search(r"\$0\.\d{4}", text)
+
+
+# --------------------------------------------------------------------------
+# family_accuracy/family_consistency exclude a family with any errored member
+# --------------------------------------------------------------------------
+
+
+def test_family_with_an_errored_member_is_excluded_and_counted():
+    """Family "c1" has a canonical (correct on both runs) and a paraphrase
+    that errored on run A. Without the fix, the paraphrase silently drops
+    out of the family bucket and `all([])` scores the family "all correct"
+    on the strength of the canonical alone -- the errored member's real
+    correctness is unknown and must not be assumed.
+    """
+    from cert_nlq.registry.models import Registry, RootSpec
+
+    root = RootSpec(root="widget", label="Widgets", key=(), fields=())
+    reg = Registry(version="v", roots=(root,))
+
+    canonical = _ok_case("c1")
+    paraphrase = _ok_case("c1-p1", paraphrase_of="c1")
+    cases = [canonical, paraphrase]
+
+    rows_a = [_row("c1", True), _row("c1-p1", False, error="timeout")]
+    rows_b = [_row("c1", True), _row("c1-p1", True)]
+    run_a, run_b = _run_identity(id="run-a"), _run_identity(id="run-b")
+
+    text = render_compare(run_a, rows_a, run_b, rows_b, cases, reg, seed=1)
+
+    # The compromised family must not appear as "all correct" in either
+    # model's family_accuracy -- with zero eligible families left, the rate
+    # is an honest n/a, not a fabricated 1.000.
+    acc_line = next(line for line in text.splitlines() if "family_accuracy" in line)
+    assert "n/a" in acc_line
+    assert "errored member: 1" in text
+
+
+def test_family_error_exclusion_reports_zero_when_nothing_is_compromised(registry):
+    canonical = _ok_case("c1")
+    paraphrase = _ok_case("c1-p1", paraphrase_of="c1")
+    cases = [canonical, paraphrase]
+    rows_a = [_row("c1", True), _row("c1-p1", True)]
+    rows_b = [_row("c1", True), _row("c1-p1", True)]
+    run_a, run_b = _run_identity(id="run-a"), _run_identity(id="run-b")
+
+    text = render_compare(run_a, rows_a, run_b, rows_b, cases, registry, seed=1)
+
+    assert "errored member: 0" in text
+
+
+# --------------------------------------------------------------------------
+# Wilson wiring: single-run headline block only
+# --------------------------------------------------------------------------
+
+
+def test_render_single_run_includes_wilson_intervals_on_headline_rates(registry):
+    cases = [_ok_case("c1"), _ok_case("c2")]
+    rows = [_row("c1", True), _row("c2", False)]
+    run = _run_identity()
+
+    text = render_single_run(run, rows, cases, registry)
+
+    assert "Wilson 95% CI" in text
+    e2e_line = next(line for line in text.splitlines() if "E2E-correct rate" in line)
+    assert "Wilson" in e2e_line
+
+
+def test_render_compare_explanatory_cascade_has_no_wilson_intervals(registry):
+    """The compare report's cascade stays descriptive -- Wilson is a
+    single-run-report-only addition."""
+    cases = [_ok_case("c1")]
+    rows_a = [_row("c1", True)]
+    rows_b = [_row("c1", False)]
+    run_a, run_b = _run_identity(id="run-a"), _run_identity(id="run-b")
+
+    text = render_compare(run_a, rows_a, run_b, rows_b, cases, registry, seed=1)
+
+    assert "Wilson" not in text
+
+
+# --------------------------------------------------------------------------
+# compare header: sampling metadata visible up top
+# --------------------------------------------------------------------------
+
+
+def test_render_compare_header_shows_canonical_only_and_stratify(registry):
+    cases = [_ok_case("c1")]
+    rows_a = [_row("c1", True)]
+    rows_b = [_row("c1", True)]
+    run_a = _run_identity(id="run-a", canonical_only=True, stratify=None)
+    run_b = _run_identity(id="run-b", canonical_only=False, stratify=40)
+
+    text = render_compare(run_a, rows_a, run_b, rows_b, cases, registry, seed=1)
+
+    assert "canonical_only=True" in text
+    assert "stratify=40" in text

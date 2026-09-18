@@ -3,15 +3,19 @@
 
 Two modes, chosen by `--compare`:
 
-**Run mode** (`--provider-tag openai|ollama [--limit N] [--stratify N]
+**Run mode** (`--provider-tag openai|ollama [--limit N | --stratify N]
 [--canonical-only] [--seed S] [--yes-spend] [--notes "..."]`): load the
-golden set, sample it (`--canonical-only` first, `--stratify` second -- see
-`runner.stratified_sample`'s own docstring for why that order and not the
-reverse: stratifying first would draw proportionally across a set that
-still includes paraphrases, then discarding the paraphrases afterwards would
-silently unbalance the strata the sampler just built), check `/healthz`
-(refusing on anything but `"status": "ok"`), print and gate a spend estimate
--- gated on what `/healthz` actually reports as the serving provider, not on
+golden set, sample it (`--canonical-only` first, then AT MOST ONE of
+`--stratify`/`--limit` -- mutually exclusive, since `--stratify` already
+keeps families whole and `--limit` truncating its output afterwards would
+re-split them; see `runner.stratified_sample`'s own docstring for why
+`--canonical-only` comes first: stratifying before it would draw
+proportionally across a set that still includes paraphrases, then
+discarding them afterwards would silently unbalance the strata the sampler
+just built. `--limit` alone truncates at a family boundary too, via
+`runner.limit_to_family_boundary`), check `/healthz` (refusing on anything
+but `"status": "ok"`), print and gate a spend estimate -- gated on what
+`/healthz` actually reports as the serving provider, not on
 `--provider-tag`: a typo'd tag must not place billable calls against the
 real deploy -- fan the sample out through `runner.run_benchmark`, score
 every result, record the run and its rows, and render the single-run report
@@ -49,7 +53,12 @@ from .report import (
     render_compare,
     render_single_run,
 )
-from .runner import canonical_only, run_benchmark, stratified_sample
+from .runner import (
+    canonical_only,
+    limit_to_family_boundary,
+    run_benchmark,
+    stratified_sample,
+)
 from .scoring import score
 from .store import open_store
 
@@ -68,11 +77,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "The spend gate is keyed off /healthz's own reported provider, not this flag "
         "(a wrong tag must not skip the gate).",
     )
-    parser.add_argument("--limit", type=int, default=None, help="Cap the sampled case count.")
+    parser.add_argument(
+        "--limit", type=int, default=None,
+        help="Cap the case count, dropping whole families from the tail (never "
+        "mid-family). Mutually exclusive with --stratify.",
+    )
     parser.add_argument(
         "--stratify", type=int, default=None,
         help="Draw a seeded, family-whole sample of about N cases, proportional across "
-        "difficulty strata. Applied after --canonical-only.",
+        "(expectation kind, difficulty) strata. Applied after --canonical-only. "
+        "Mutually exclusive with --limit.",
     )
     parser.add_argument(
         "--canonical-only", action="store_true",
@@ -181,6 +195,13 @@ def _run_compare(args: argparse.Namespace, settings) -> int:
 
     out_path = REPORTS_DIR / f"compare-{run_a.id}-{run_b.id}.md"
     _write_report(out_path, text)
+    # The bootstrap seed belongs to this *pair*, chosen now, not to either
+    # run's own `seed` column (that one is the sampling seed -- see its
+    # corrected comment in store.py). Recorded on both runs via `notes` so
+    # it survives alongside them without a schema change.
+    bootstrap_note = f"bootstrap_seed={args.seed}"
+    store.append_note(run_a.id, bootstrap_note)
+    store.append_note(run_b.id, bootstrap_note)
     print(f"wrote {out_path}")
     return 0
 
@@ -191,22 +212,39 @@ def _run_compare(args: argparse.Namespace, settings) -> int:
 
 
 def _sample(cases: list[GoldenCase], args: argparse.Namespace, registry) -> list[GoldenCase]:
+    """`--stratify` and `--limit` are mutually exclusive (validated in
+    `_validate_sample_args`), so at most one of the two branches below ever
+    runs -- `--limit` alone truncates at a family boundary
+    (`limit_to_family_boundary`), never mid-family, for the same reason
+    `--stratify` keeps families whole: a partial family would let
+    `family_accuracy`/`family_consistency` see some but not all of a
+    canonical case's confirmed paraphrases.
+    """
     if args.canonical_only:
         cases = canonical_only(cases)
     if args.stratify is not None:
         cases = stratified_sample(cases, args.stratify, seed=args.seed, registry=registry)
-    if args.limit is not None:
-        cases = cases[: args.limit]
+    elif args.limit is not None:
+        cases = limit_to_family_boundary(cases, args.limit)
     return cases
 
 
 def _validate_sample_args(args: argparse.Namespace) -> str | None:
     """`None` when `--stratify`/`--limit` are usable, else the error to
-    print. Checked with `is not None`, not truthiness: an explicit `0`
-    (`--stratify 0`, `--limit 0`) must fail loudly -- a caller who typed it
-    almost certainly meant something else -- rather than being silently
+    print.
+
+    `--stratify` and `--limit` are mutually exclusive: `--stratify` already
+    returns approximately N cases on its own, and letting `--limit` further
+    truncate its output would re-split families the sampler just went to
+    the trouble of keeping whole (2026-09-18 review).
+
+    Both are also checked with `is not None`, not truthiness: an explicit
+    `0` (`--stratify 0`, `--limit 0`) must fail loudly -- a caller who typed
+    it almost certainly meant something else -- rather than being silently
     read the same as "flag not given" and quietly running the full set.
     """
+    if args.stratify is not None and args.limit is not None:
+        return "--stratify and --limit are mutually exclusive"
     if args.stratify is not None and args.stratify <= 0:
         return f"--stratify must be a positive integer, got {args.stratify}"
     if args.limit is not None and args.limit <= 0:

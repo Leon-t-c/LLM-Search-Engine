@@ -420,6 +420,99 @@ def test_evals_code_hash_changes_when_source_text_changes(tmp_path, monkeypatch)
     assert before != after
 
 
+
+
+def test_hashed_modules_includes_runner_excludes_report():
+    """Pinned membership (2026-09-18 review): `runner.py`'s wire-status
+    translation and usage/route extraction decide what an answer *is*, so
+    it must participate; `report.py` only renders already-scored rows and
+    must not -- see `_HASHED_MODULES`'s own comment for the full reasoning.
+    """
+    assert set(store_module._HASHED_MODULES) == {
+        "aggregate", "golden", "runner", "scoring", "stats",
+    }
+    assert "report" not in store_module._HASHED_MODULES
+
+
+def test_evals_code_hash_changes_when_runner_source_changes(tmp_path, monkeypatch):
+    """Same probe as the scoring.py test above, aimed at `runner.py` --
+    confirms it is actually read, not just listed.
+    """
+    from pathlib import Path
+
+    real_module = importlib.import_module("cert_nlq.evals.runner")
+    real_text = Path(real_module.__file__).read_text(encoding="utf-8")
+
+    fake_path = tmp_path / "runner_copy.py"
+    fake_path.write_text(real_text, encoding="utf-8")
+
+    real_import_module = importlib.import_module
+
+    def fake_import_module(name, *args, **kwargs):
+        if name == "cert_nlq.evals.runner":
+            return types.SimpleNamespace(__file__=str(fake_path))
+        return real_import_module(name, *args, **kwargs)
+
+    monkeypatch.setattr(store_module.importlib, "import_module", fake_import_module)
+
+    before = evals_code_hash()
+
+    fake_path.write_text(real_text + "\n# a harmless comment\n", encoding="utf-8")
+    after = evals_code_hash()
+
+    assert before != after
+
+
+def test_evals_code_hash_never_imports_report():
+    """`report.py` changes must never perturb the hash -- checked directly
+    against the real, unmocked `evals_code_hash()`: it must not even import
+    `cert_nlq.evals.report` while computing the hash.
+    """
+    real_import_module = importlib.import_module
+    imported = []
+
+    def spy_import_module(name, *args, **kwargs):
+        imported.append(name)
+        return real_import_module(name, *args, **kwargs)
+
+    import unittest.mock as mock
+    with mock.patch.object(store_module.importlib, "import_module", spy_import_module):
+        evals_code_hash()
+
+    assert "cert_nlq.evals.report" not in imported
+
+
+# --------------------------------------------------------------------------
+# append_note()
+# --------------------------------------------------------------------------
+
+
+def test_append_note_creates_notes_from_blank():
+    store = open_store(":memory:")
+    run_id = store.record_run(**_identity(notes=None))
+
+    store.append_note(run_id, "bootstrap_seed=7")
+
+    run, _ = store.load_run(run_id)
+    assert run.notes == "bootstrap_seed=7"
+
+
+def test_append_note_appends_space_separated_to_existing_notes():
+    store = open_store(":memory:")
+    run_id = store.record_run(**_identity(notes="a smoke run"))
+
+    store.append_note(run_id, "bootstrap_seed=7")
+
+    run, _ = store.load_run(run_id)
+    assert run.notes == "a smoke run bootstrap_seed=7"
+
+
+def test_append_note_raises_for_unknown_run_id():
+    store = open_store(":memory:")
+    with pytest.raises(KeyError):
+        store.append_note("does-not-exist", "bootstrap_seed=7")
+
+
 # --------------------------------------------------------------------------
 # missing sqlalchemy
 # --------------------------------------------------------------------------
