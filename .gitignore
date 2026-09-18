@@ -23,3 +23,9 @@ __pycache__/
 # accumulates locally and would churn every commit.
 smoke*.json
 usage.log
+
+# Evaluation outputs. The golden set itself IS committed (eval_data/golden.jsonl):
+# it is the durable input every reported number rests on. These two are the
+# outputs -- the run store and the rendered reports -- and they churn every run.
+eval_data/evals.db
+eval_data/reports/
