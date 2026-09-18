@@ -147,7 +147,8 @@ queries. Generation is automated; inheritance is confirmed. Three layers:
 ## Conventions the gold payloads follow
 
 These are decisions, not facts. They are written down so a disagreement is a
-conversation about one line here rather than an argument about fifty cases.
+conversation about one line here rather than an argument about a hundred
+cases.
 
 - **Values are stored codes, not the words a user typed.** A gold payload
   describes the payload *after* value resolution: `"Quee"`, not `"Queens"`;

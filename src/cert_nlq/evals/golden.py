@@ -16,8 +16,8 @@ for every run afterwards:
    not exist, or an operator the field does not allow, could never be produced
    by a correct service, so scoring against it measures nothing.
 2. Every problem in the file is collected and reported together. A loader that
-   raises on the first one turns a review pass over fifty-odd hand-written
-   cases into fifty-odd runs.
+   raises on the first one turns a review pass over a set of this size
+   into one run per mistake.
 """
 import json
 import re
