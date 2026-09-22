@@ -42,7 +42,11 @@ class Unresolvable(BaseModel):
     value: JsonScalar
 
 
-def resolve_vocabulary(spec: FieldSpec, raw) -> str | None:
+#: Below four characters, prefix matching collides with ordinary English.
+_MIN_PREFIX = 4
+
+
+def resolve_vocabulary(spec: FieldSpec, raw, *, allow_prefix: bool = True) -> str | None:
     """Map a word the user typed onto the code they would have typed.
 
     Matches an existing code first, then a meaning, then a synonym — all
@@ -65,6 +69,25 @@ def resolve_vocabulary(spec: FieldSpec, raw) -> str | None:
     for entry in spec.vocabulary:
         if any(s.casefold() == needle for s in entry.synonyms):
             return entry.code
+    # Fourth tier: a UNIQUE prefix of exactly one meaning. Live use showed
+    # the near-miss this exists for: "Queen" for the meaning "Queens" --
+    # exact matching sent it to clarification every time, which a user
+    # reads as the system failing to know its own boroughs. Prefix rather
+    # than fuzzy because this module's charter is determinism: no edit
+    # distance, no score, no threshold to defend. Guard rails: at least
+    # four characters (below that, prefixes collide with English too
+    # easily), and the prefix must select exactly ONE entry across
+    # meanings and synonyms -- an ambiguous prefix stays unresolved, so
+    # the clarification path keeps doing its job.
+    if allow_prefix and len(needle) >= _MIN_PREFIX:
+        hits = {
+            entry.code
+            for entry in spec.vocabulary
+            if entry.meaning.casefold().startswith(needle)
+            or any(s.casefold().startswith(needle) for s in entry.synonyms)
+        }
+        if len(hits) == 1:
+            return hits.pop()
     return None
 
 

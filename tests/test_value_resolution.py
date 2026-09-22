@@ -186,3 +186,37 @@ def test_a_vocabulary_beats_the_type_parser(registry):
     resolved, unresolved = resolve_values(payload, patched, now_year=2026)
     assert resolved.where.children[0].value == "Z"
     assert unresolved == []
+
+
+def test_a_unique_meaning_prefix_resolves(registry):
+    """"Queen" for the meaning "Queens" -- the live near-miss the fourth
+    tier exists for. Exact matching sent it to clarification every time,
+    which a user reads as the system not knowing its own boroughs."""
+    assert resolve_vocabulary(_spec(registry, "widget.status"), "Acti") == "A"
+
+
+def test_below_four_characters_never_prefix_matches(registry):
+    assert resolve_vocabulary(_spec(registry, "widget.status"), "Act") is None
+
+
+def test_an_ambiguous_prefix_stays_unresolved(registry):
+    """Both "Active" and a synonym starting the same way must refuse.
+
+    Built inline: two entries whose meanings share the prefix "Reti" --
+    a prefix selecting more than one code keeps the clarification path
+    doing its job."""
+    from cert_nlq.registry.models import FieldSpec
+    spec = FieldSpec(
+        key="w.x", table="w", column="x", label="X", type="text",
+        group="G", operators=("=",),
+        vocabulary=(
+            VocabEntry(code="R1", meaning="Retired early"),
+            VocabEntry(code="R2", meaning="Retired late"),
+        ),
+    )
+    assert resolve_vocabulary(spec, "Retired") is None
+    assert resolve_vocabulary(spec, "Retired e") == "R1"
+
+
+def test_exact_match_still_beats_the_prefix_tier(registry):
+    assert resolve_vocabulary(_spec(registry, "widget.status"), "active") == "A"

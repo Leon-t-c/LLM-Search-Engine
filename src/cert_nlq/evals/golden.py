@@ -577,7 +577,12 @@ def _check_clarify_is_reachable(case: GoldenCase, registry: Registry) -> list[st
         if spec is None:
             continue
         for phrase in phrases:
-            code = resolve_vocabulary(spec, phrase)
+            # Strict tiers only. The prefix tier is a deliberate leniency
+            # for near-miss *values* ("Queen" for Queens); running it over
+            # every word of a question makes ordinary English false-positive
+            # -- "rent" in "rent stabilized" prefix-resolves to a propcode,
+            # but the model emits the operative phrase, which does not.
+            code = resolve_vocabulary(spec, phrase, allow_prefix=False)
             if code is not None:
                 problems.append(
                     f"{case.id}: {phrase!r} resolves on {case.expect.field!r} "
