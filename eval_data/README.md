@@ -216,14 +216,25 @@ project actually has: a GTX 970, 4 GB VRAM, compute capability 5.2.
 run the installer. It installs as a background service, listening on
 `127.0.0.1:11434` by default — nothing here talks to any other host.
 
-**2. Pull a model.**
+**2. Pull a model — what actually happened at setup (2026-09-24).**
+
+The official library has no `qwen3:4b-instruct-2507` tag ("file does not
+exist"), and a direct Hugging Face pull
+(`huggingface.co/Qwen/Qwen3-4B-Instruct-2507-GGUF:Q4_K_M`) returned 401 —
+HF's registry wants authentication these days. What is installed and
+verified working is a community upload of the same quantised weights:
 
 ```
-ollama pull qwen3:4b-instruct-2507
+ollama pull kamekichi128/qwen3-4b-instruct-2507
 ```
 
-The tag above is what was current when this was written; **tags drift**, so
-before relying on it, check what actually landed:
+digest `a6c0056919a7`, 2.5 GB Q4. Record that digest in the run's notes:
+it, not the tag, is what pins which weights answered. If full provenance
+is ever wanted, download the official GGUF from the Qwen HF repo in a
+browser and `ollama create` it from a two-line Modelfile — optional, and
+the comparison's identity block makes any switch visible.
+
+Whatever you pull, confirm with:
 
 ```
 ollama list
@@ -254,7 +265,7 @@ directly in the shell that starts this run:
 ```
 CERT_NLQ_PROVIDER=ollama
 CERT_NLQ_OLLAMA_URL=http://127.0.0.1:11434
-CERT_NLQ_OLLAMA_MODEL=qwen3:4b-instruct-2507   # the tag from `ollama list`
+CERT_NLQ_OLLAMA_MODEL=kamekichi128/qwen3-4b-instruct-2507:latest   # the tag from `ollama list`, verbatim
 ```
 
 `pydantic-settings` reads `.env` by name, not by convention, so pointing a
@@ -285,6 +296,28 @@ for the body shape) or by pointing the eval harness's `--limit 1` at it. The
 first call is the slow one — model load into VRAM happens then, inside the
 adapter's 300 s timeout (see `PROVIDER_TIMEOUT` in
 `translate/ollama_provider.py`) — every call after it should be fast.
+
+**5b. The GPU story on this machine, learned the hard way (2026-09-24).**
+The GTX 970 is Maxwell, and the 580-branch driver (582.66, CUDA 13) still
+*displays* on Maxwell but its CUDA JIT refuses to compile for it — Ollama's
+`cuda_v12` runner dies with "the provided PTX was compiled with an
+unsupported toolchain" (exit 0xc0000409). Do not chase CUDA here and do
+not downgrade the driver: **the Vulkan runner is the path.** It is
+persisted user-level:
+
+```
+setx OLLAMA_VULKAN 1
+setx OLLAMA_LLM_LIBRARY vulkan
+```
+
+Verified: 24/37 layers offloaded (`ollama ps` reads "15%/85% CPU/GPU"),
+~10.6 tok/s generation — modest, free, and fine for eval batches. If a
+future Ollama or driver changes this, the CPU fallback always works
+(per-request `options: {"num_gpu": 0}` proved it). Side effect of any
+driver install: GPU-accelerated apps that were running lose their
+rendering context — a blank VS Code integrated terminal after a driver
+swap is fixed by restarting VS Code, or failing that, settings →
+`terminal.integrated.gpuAcceleration: "off"`.
 
 **6. Verify on first run.** Three details of the Ollama request/response
 shape were written from documentation, not confirmed against a running
